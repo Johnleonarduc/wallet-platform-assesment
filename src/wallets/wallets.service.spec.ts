@@ -262,12 +262,20 @@ describe('WalletsService', () => {
     const toId = new Types.ObjectId();
 
     function mockWallets(fromBalance: number) {
-      const fromWallet = { _id: fromId, balance: fromBalance, save: jest.fn() };
+      const fromWallet = { _id: fromId, balance: fromBalance };
       const toWallet = { _id: toId, balance: 0 };
-      walletModel.findById.mockImplementation((id: unknown) => {
-        if (String(id) === String(fromId)) return Promise.resolve(fromWallet);
-        if (String(id) === String(toId)) return Promise.resolve(toWallet);
-        return Promise.resolve(null);
+      walletModel.exists.mockImplementation(({ _id }: { _id: unknown }) => ({
+        session: jest
+          .fn()
+          .mockResolvedValue(
+            String(_id) === String(fromId) || String(_id) === String(toId) ? { _id } : null,
+          ),
+      }));
+      walletModel.findOneAndUpdate.mockImplementation((_filter: { balance: { $gte: number } }) => {
+        const amount = _filter.balance.$gte;
+        if (fromBalance < amount) return Promise.resolve(null);
+        fromWallet.balance = fromBalance - amount;
+        return Promise.resolve(fromWallet);
       });
       return { fromWallet, toWallet };
     }
@@ -283,7 +291,7 @@ describe('WalletsService', () => {
     });
 
     it('throws NotFoundException when either wallet is missing', async () => {
-      walletModel.findById.mockResolvedValue(null);
+      walletModel.exists.mockReturnValue({ session: jest.fn().mockResolvedValue(null) });
 
       await expect(
         service.transfer({
@@ -308,7 +316,7 @@ describe('WalletsService', () => {
 
     it('debits the sender, records a ledger entry, and enqueues a transfer event transactionally', async () => {
       const { fromWallet } = mockWallets(100);
-      const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
+      const createdTransfer = { _id: new Types.ObjectId(), toWalletId: toId, status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
       const debitTransaction = { _id: new Types.ObjectId() };
       transactionModel.create.mockResolvedValue([debitTransaction]);
@@ -319,6 +327,11 @@ describe('WalletsService', () => {
         amount: 30,
       });
 
+      expect(walletModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { _id: fromId.toString(), balance: { $gte: 30 } },
+        { $inc: { balance: -30, version: 1 } },
+        { new: true, session: mockSession },
+      );
       expect(fromWallet.balance).toBe(70);
       expect(ledgerService.recordDebit).toHaveBeenCalledWith(
         fromWallet._id,
@@ -338,7 +351,7 @@ describe('WalletsService', () => {
 
     it('does not create a second transfer when retried with the same idempotency key', async () => {
       mockWallets(100);
-      const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
+      const createdTransfer = { _id: new Types.ObjectId(), toWalletId: toId, status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
       transactionModel.create.mockResolvedValue([{ _id: new Types.ObjectId() }]);
       transferModel.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(createdTransfer);
@@ -378,7 +391,7 @@ describe('WalletsService', () => {
 
     it('ends the Mongo session even when the transaction fails partway through', async () => {
       mockWallets(100);
-      const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
+      const createdTransfer = { _id: new Types.ObjectId(), toWalletId: toId, status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
       transactionModel.create.mockRejectedValue(new Error('write conflict'));
 

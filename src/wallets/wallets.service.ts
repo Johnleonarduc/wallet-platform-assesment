@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
-import { Connection, Model } from 'mongoose';
+import { Connection, Model, Types } from 'mongoose';
 import { LedgerEntry, LedgerEntryDocument } from '../ledger/schemas/ledger-entry.schema';
 import { LedgerService } from '../ledger/ledger.service';
 import { OutboxService } from '../outbox/outbox.service';
@@ -210,29 +210,38 @@ export class WalletsService {
       }
     }
 
-    const [fromWallet, toWallet] = await Promise.all([
-      this.walletModel.findById(dto.fromWalletId),
-      this.walletModel.findById(dto.toWalletId),
-    ]);
-
-    if (!fromWallet || !toWallet) {
-      throw new NotFoundException('Wallet not found');
-    }
-
-    if (fromWallet.balance < dto.amount) {
-      throw new BadRequestException('Insufficient balance');
-    }
-
     const session = await this.connection.startSession();
     let transfer!: TransferDocument;
 
     try {
       await session.withTransaction(async () => {
+        const destinationExists = await this.walletModel
+          .exists({ _id: dto.toWalletId })
+          .session(session);
+        if (!destinationExists) {
+          throw new NotFoundException('Wallet not found');
+        }
+
+        const fromWallet = await this.walletModel.findOneAndUpdate(
+          { _id: dto.fromWalletId, balance: { $gte: dto.amount } },
+          { $inc: { balance: -dto.amount, version: 1 } },
+          { new: true, session },
+        );
+        if (!fromWallet) {
+          const senderExists = await this.walletModel
+            .exists({ _id: dto.fromWalletId })
+            .session(session);
+          if (!senderExists) {
+            throw new NotFoundException('Wallet not found');
+          }
+          throw new BadRequestException('Insufficient balance');
+        }
+
         [transfer] = await this.transferModel.create(
           [
             {
               fromWalletId: fromWallet._id,
-              toWalletId: toWallet._id,
+              toWalletId: new Types.ObjectId(dto.toWalletId),
               amount: dto.amount,
               status: TransferStatus.PENDING,
               idempotencyKey: dto.idempotencyKey,
@@ -240,9 +249,6 @@ export class WalletsService {
           ],
           { session },
         );
-
-        fromWallet.balance -= dto.amount;
-        await fromWallet.save({ session });
 
         const [debitTransaction] = await this.transactionModel.create(
           [
@@ -253,7 +259,7 @@ export class WalletsService {
               status: TransactionStatus.COMPLETED,
               balanceAfter: fromWallet.balance,
               transferId: transfer._id,
-              counterpartyWalletId: toWallet._id,
+              counterpartyWalletId: transfer.toWalletId,
             },
           ],
           { session },
@@ -272,7 +278,7 @@ export class WalletsService {
           {
             transferId: transfer._id.toString(),
             fromWalletId: fromWallet._id.toString(),
-            toWalletId: toWallet._id.toString(),
+            toWalletId: transfer.toWalletId.toString(),
             amount: dto.amount,
           },
           session,

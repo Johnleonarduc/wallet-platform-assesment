@@ -38,6 +38,10 @@ etc.).
 - **Deposits and withdrawals could partially persist.** Their wallet balance,
   transaction history, and ledger writes were independent. A later failure
   could leave balances without matching auditable records.
+- **Concurrent transfers could overspend a sender.** Transfer initiation read
+  and approved the sender balance before starting its transaction, then saved a
+  stale in-memory wallet document. Parallel transfers could all approve against
+  the same original balance.
 
 ## 2. What did you prioritize, and why?
 
@@ -79,6 +83,10 @@ disagreement breaks auditability and reconciliation. Both paths now include the
 balance mutation, transaction record, ledger entry, and outbox intent in one
 MongoDB transaction.
 
+I next fixed concurrent sender debits because transfers still had the same
+overspending class previously removed from withdrawals. The database now makes
+the funds-availability decision inside the transfer transaction.
+
 ## 3. How did you handle concurrency?
 
 Where in the system can two requests race each other? What did you change,
@@ -104,6 +112,13 @@ MongoDB transaction as the receiver balance increment, credit transaction, and
 ledger entry. Concurrent or repeated deliveries observe `COMPLETED` and become
 no-ops. A real MongoDB test delivers the same event twice and verifies one
 credit, one transaction, and one ledger entry.
+
+Transfer initiation now conditionally decrements the sender with
+`balance >= amount` and `$inc` inside the MongoDB transaction. Only transfers
+covered by the current balance can commit under any request interleaving. Ten
+simultaneous integration requests verify that the sender never becomes
+negative, its balance reconciles with successful requests, and the receiver
+eventually receives exactly the committed total.
 
 ## 4. How did you ensure data consistency?
 
@@ -161,6 +176,11 @@ wallet (`404`) from insufficient funds (`400`), adding one query only on failure
 MongoDB transactions add latency and require the documented replica-set
 deployment. New wallet deposit/withdrawal events also add outbox and broker
 volume, but preserve a durable post-commit event boundary.
+
+Conditional sender updates can contend on a high-traffic wallet, causing
+MongoDB transaction retries and lower throughput. That cost is preferable to
+overspending. Destination existence requires an additional transactional query
+because the stale pre-transaction wallet reads were removed.
 
 Outbox delivery is asynchronous, so settlement gains a small delay and depends
 on the relay. The relay may publish twice if it crashes after RabbitMQ confirms
