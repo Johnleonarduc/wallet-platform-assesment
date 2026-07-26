@@ -168,6 +168,7 @@ describe('WalletsService', () => {
         50,
         150,
       );
+      expect(redisService.invalidateBalance).toHaveBeenCalledWith(walletId);
       expect(result).toBe(updatedWallet);
     });
 
@@ -195,6 +196,7 @@ describe('WalletsService', () => {
         { new: true },
       );
       expect(ledgerService.recordDebit).toHaveBeenCalledWith(wallet._id, transaction._id, 40, 60);
+      expect(redisService.invalidateBalance).toHaveBeenCalledWith('w1');
       expect(result).toBe(wallet);
     });
 
@@ -291,6 +293,7 @@ describe('WalletsService', () => {
         expect.objectContaining({ transferId: createdTransfer._id.toString(), amount: 30 }),
         mockSession,
       );
+      expect(redisService.invalidateBalance).toHaveBeenCalledWith(fromId.toString());
       expect(result).toBe(createdTransfer);
     });
 

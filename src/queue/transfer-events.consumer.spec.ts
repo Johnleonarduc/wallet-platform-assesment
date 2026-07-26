@@ -2,6 +2,7 @@ import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Types } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
+import { RedisService } from '../redis/redis.service';
 import { Transaction, TransactionType } from '../transactions/schemas/transaction.schema';
 import { Transfer, TransferStatus } from '../wallets/schemas/transfer.schema';
 import { Wallet } from '../wallets/schemas/wallet.schema';
@@ -15,6 +16,7 @@ describe('TransferEventsConsumer', () => {
   let transactionModel: any;
   let ledgerService: any;
   let session: any;
+  let redisService: any;
 
   beforeEach(async () => {
     session = {
@@ -25,6 +27,7 @@ describe('TransferEventsConsumer', () => {
     walletModel = { findByIdAndUpdate: jest.fn() };
     transactionModel = { create: jest.fn() };
     ledgerService = { recordCredit: jest.fn() };
+    redisService = { invalidateBalance: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -41,6 +44,7 @@ describe('TransferEventsConsumer', () => {
         { provide: getModelToken(Wallet.name), useValue: walletModel },
         { provide: getModelToken(Transaction.name), useValue: transactionModel },
         { provide: LedgerService, useValue: ledgerService },
+        { provide: RedisService, useValue: redisService },
       ],
     }).compile();
 
@@ -91,6 +95,7 @@ describe('TransferEventsConsumer', () => {
       session,
     );
     expect(session.endSession).toHaveBeenCalled();
+    expect(redisService.invalidateBalance).toHaveBeenCalledWith(transfer.toWalletId.toString());
   });
 
   it('treats a duplicate event for a completed transfer as a no-op', async () => {

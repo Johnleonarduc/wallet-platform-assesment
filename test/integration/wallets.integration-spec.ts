@@ -61,4 +61,32 @@ describe('Wallets (integration)', () => {
   it('rejects malformed wallet creation payloads', async () => {
     await client.post('/wallets').send({ ownerName: 'Missing userId' }).expect(400);
   });
+
+  it('does not return a stale cached balance after wallet mutations', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'cache-user', ownerName: 'Cache Test' })
+      .expect(201);
+
+    await client
+      .get(`/wallets/${wallet.body._id}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.balance).toBe(0);
+      });
+    await client.post(`/wallets/${wallet.body._id}/deposit`).send({ amount: 100 }).expect(201);
+    await client
+      .get(`/wallets/${wallet.body._id}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.balance).toBe(100);
+      });
+    await client.post(`/wallets/${wallet.body._id}/withdraw`).send({ amount: 40 }).expect(201);
+    await client
+      .get(`/wallets/${wallet.body._id}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.balance).toBe(60);
+      });
+  });
 });

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model } from 'mongoose';
 import { LedgerEntry, LedgerEntryDocument } from '../ledger/schemas/ledger-entry.schema';
@@ -21,6 +21,8 @@ import { Wallet, WalletDocument } from './schemas/wallet.schema';
 
 @Injectable()
 export class WalletsService {
+  private readonly logger = new Logger(WalletsService.name);
+
   constructor(
     @InjectConnection() private readonly connection: Connection,
     @InjectModel(Wallet.name) private readonly walletModel: Model<WalletDocument>,
@@ -103,6 +105,7 @@ export class WalletsService {
     });
 
     await this.ledgerService.recordCredit(wallet._id, transaction._id, dto.amount, wallet.balance);
+    await this.safeInvalidateBalance(id);
 
     return wallet;
   }
@@ -131,6 +134,7 @@ export class WalletsService {
     });
 
     await this.ledgerService.recordDebit(wallet._id, transaction._id, dto.amount, wallet.balance);
+    await this.safeInvalidateBalance(id);
 
     return wallet;
   }
@@ -231,6 +235,7 @@ export class WalletsService {
       await session.endSession();
     }
 
+    await this.safeInvalidateBalance(dto.fromWalletId);
     return transfer;
   }
 
@@ -241,6 +246,16 @@ export class WalletsService {
       'code' in error &&
       (error as { code?: number }).code === 11000
     );
+  }
+
+  private async safeInvalidateBalance(walletId: string) {
+    try {
+      await this.redisService.invalidateBalance(walletId);
+    } catch (error) {
+      this.logger.warn(
+        `Could not invalidate balance cache for wallet ${walletId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   async getDashboard(id: string) {

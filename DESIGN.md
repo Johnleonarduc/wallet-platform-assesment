@@ -31,6 +31,10 @@ etc.).
   performed an unconditional read/add/save and wrote the credit transaction,
   ledger entry, and transfer status independently. It also acknowledged every
   exception, permanently discarding transient failures.
+- **Balance reads returned stale Redis values after writes.** `getWallet()` used
+  a read-through balance cache, but deposit, withdrawal, sender debit, and
+  receiver credit paths never invalidated it. A cached pre-transaction balance
+  remained visible until its TTL expired.
 
 ## 2. What did you prioritize, and why?
 
@@ -62,6 +66,10 @@ and removes RabbitMQ from the request path.
 I next made settlement transactional and idempotent because outbox delivery is
 at least once by design. Without this guarantee, a normal relay retry could
 create money by crediting the receiver twice.
+
+I next fixed cache freshness because customers could observe a balance that
+disagreed with MongoDB immediately after a successful operation. The change is
+bounded to invalidating affected wallet keys after balance mutations complete.
 
 ## 3. How did you handle concurrency?
 
@@ -109,6 +117,13 @@ Malformed JSON or invalid event identities are acknowledged after logging so a
 poison message cannot loop forever. Event fields must match the stored pending
 transfer before any credit is applied.
 
+MongoDB remains authoritative and Redis now acts only as a disposable
+read-through cache. Deposits and withdrawals invalidate after their successful
+write sequence; sender transfer balances invalidate after initiation commits;
+receiver balances invalidate after settlement commits. Redis failures are
+logged rather than returned as operation failures because MongoDB may already
+contain the committed financial change.
+
 ## 5. Trade-offs
 
 What did your fixes cost - complexity, latency, throughput, code
@@ -143,6 +158,12 @@ the wallet, transaction, ledger, and transfer status an atomic unit. Malformed
 events are dropped because the project has no dead-letter queue; production
 should retain them in a DLQ for investigation.
 
+Invalidation adds a Redis round trip to successful writes. Best-effort handling
+avoids misleading clients with an error after a committed MongoDB write, but a
+failed invalidation can leave stale data until TTL expiry. There is also a narrow
+cache-aside race where a reader can fetch an old MongoDB value before a commit,
+then populate Redis after invalidation; versioned cache values would close it.
+
 ## 6. Remaining technical debt
 
 What's still broken or fragile after your changes? Be specific - this is
@@ -155,6 +176,8 @@ more useful to us than a clean-sounding summary.
   financial state.
 - Add a dead-letter queue and bounded retry/backoff policy for malformed or
   persistently failing transfer events.
+- Add version-aware cache writes or bypass cached balance reads where strict
+  read-after-write consistency is required.
 
 ## 7. What would you improve with another day?
 

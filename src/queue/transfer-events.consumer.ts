@@ -3,6 +3,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ConsumeMessage } from 'amqplib';
 import { Connection, isValidObjectId, Model } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
+import { RedisService } from '../redis/redis.service';
 import {
   Transaction,
   TransactionDocument,
@@ -34,6 +35,7 @@ export class TransferEventsConsumer implements OnModuleInit {
     @InjectModel(Transaction.name)
     private readonly transactionModel: Model<TransactionDocument>,
     private readonly ledgerService: LedgerService,
+    private readonly redisService: RedisService,
   ) {}
 
   onModuleInit() {
@@ -131,6 +133,13 @@ export class TransferEventsConsumer implements OnModuleInit {
     }
 
     if (settled) {
+      try {
+        await this.redisService.invalidateBalance(event.toWalletId);
+      } catch (error) {
+        this.logger.warn(
+          `Could not invalidate balance cache for wallet ${event.toWalletId}: ${(error as Error).message}`,
+        );
+      }
       this.logger.log(`Transfer ${event.transferId} completed for wallet ${event.toWalletId}`);
     }
   }

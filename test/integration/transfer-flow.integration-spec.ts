@@ -51,6 +51,8 @@ describe('Transfer flow (integration)', () => {
       .expect(201);
 
     await client.post(`/wallets/${fromWallet.body._id}/deposit`).send({ amount: 500 }).expect(201);
+    await client.get(`/wallets/${fromWallet.body._id}`).expect(200);
+    await client.get(`/wallets/${toWallet.body._id}`).expect(200);
 
     const transferResponse = await client
       .post('/wallets/transfer')
@@ -71,6 +73,18 @@ describe('Transfer flow (integration)', () => {
 
     const receiverWallet = await walletModel.findById(toWallet.body._id);
     expect(receiverWallet?.balance).toBe(120);
+    await client
+      .get(`/wallets/${fromWallet.body._id}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.balance).toBe(380);
+      });
+    await client
+      .get(`/wallets/${toWallet.body._id}`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.balance).toBe(120);
+      });
 
     const outboxEvent = await getModel(app, OutboxEvent.name).findOne({
       routingKey: 'transfer.initiated',
