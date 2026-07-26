@@ -11,6 +11,7 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   private channelWrapper: ChannelWrapper;
   private readonly exchange: string;
   private readonly transferQueue: string;
+  private stopping = false;
 
   constructor(private readonly configService: ConfigService) {
     this.exchange = this.configService.getOrThrow<string>('rabbitmq.exchange');
@@ -33,6 +34,11 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
           channel.bindQueue(this.transferQueue, this.exchange, 'transfer.*'),
         ]),
     });
+    this.channelWrapper.on('error', (error) => {
+      if (!this.stopping) {
+        this.logger.error(`RabbitMQ channel error: ${(error as Error).message}`);
+      }
+    });
   }
 
   async publish(routingKey: string, payload: Record<string, unknown>): Promise<void> {
@@ -51,6 +57,7 @@ export class RabbitMQService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.stopping = true;
     await this.channelWrapper?.close();
     await this.connection?.close();
   }

@@ -7,7 +7,8 @@ import { RabbitMQService } from '../queue/rabbitmq.service';
 export class OutboxRelayWorker implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OutboxRelayWorker.name);
   private timer: NodeJS.Timeout;
-  private running = false;
+  private currentRelay?: Promise<void>;
+  private stopping = false;
 
   constructor(
     private readonly outboxService: OutboxService,
@@ -17,15 +18,18 @@ export class OutboxRelayWorker implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     const intervalMs = this.configService.getOrThrow<number>('workers.outboxRelayIntervalMs');
-    this.timer = setInterval(() => this.relay(), intervalMs);
+    this.timer = setInterval(() => {
+      if (this.stopping || this.currentRelay) {
+        return;
+      }
+
+      this.currentRelay = this.relay().finally(() => {
+        this.currentRelay = undefined;
+      });
+    }, intervalMs);
   }
 
   private async relay() {
-    if (this.running) {
-      return;
-    }
-    this.running = true;
-
     try {
       const pending = await this.outboxService.findPending(50);
       for (const event of pending) {
@@ -34,12 +38,12 @@ export class OutboxRelayWorker implements OnModuleInit, OnModuleDestroy {
       }
     } catch (error) {
       this.logger.error(`Outbox relay failed: ${(error as Error).message}`);
-    } finally {
-      this.running = false;
     }
   }
 
-  onModuleDestroy() {
+  async onModuleDestroy() {
+    this.stopping = true;
     clearInterval(this.timer);
+    await this.currentRelay;
   }
 }
