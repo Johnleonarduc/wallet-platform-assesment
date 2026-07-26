@@ -19,6 +19,10 @@ etc.).
   test reproduced two transfer documents for two calls using the same
   `idempotencyKey`. The field was stored but never queried and had no unique
   database index, allowing repeated sender debits, ledger entries, and events.
+- **Concurrent withdrawals could make a wallet negative.** Code inspection
+  found a read/check/mutate/save sequence, and the visible concurrency test
+  reproduced the race under parallel requests. Multiple requests could approve
+  against the same stale balance before any save completed.
 
 ## 2. What did you prioritize, and why?
 
@@ -37,6 +41,11 @@ direct financial-loss risk. Normal retries now return the existing transfer. A
 unique partial MongoDB index and duplicate-key recovery protect concurrent
 retries.
 
+I then fixed concurrent withdrawal overspending because it violates the core
+wallet invariant. The balance check and decrement are now one conditional
+MongoDB update, making the fix small and directly enforceable by the source of
+truth.
+
 ## 3. How did you handle concurrency?
 
 Where in the system can two requests race each other? What did you change,
@@ -50,6 +59,12 @@ unique index is the concurrency authority. If two requests race, only one can
 insert the key; the loser handles MongoDB error `11000` and returns the winning
 transfer after its transaction aborts. Unit tests cover both paths, and a real
 MongoDB integration test verifies one transfer and one sender debit.
+
+Withdrawals now use `findOneAndUpdate` with `balance >= amount` and an atomic
+negative `$inc`. MongoDB permits only the withdrawals covered by the current
+balance, regardless of request interleaving. A real integration test runs ten
+simultaneous withdrawals and verifies that the final balance is non-negative
+and exactly reconciles with the successful responses.
 
 ## 4. How did you ensure data consistency?
 
@@ -79,6 +94,13 @@ a key are not idempotent. The unique index adds a small write and storage cost.
 A reused key currently returns the original transfer; stricter request
 fingerprint validation could reject reuse with different wallets or amounts.
 
+The atomic withdrawal update also increments the existing wallet `version`
+field. A failed conditional update needs a second read to distinguish a missing
+wallet (`404`) from insufficient funds (`400`), adding one query only on failure.
+This focused fix does not yet make the subsequent transaction and ledger writes
+atomic with the balance update; that consistency boundary remains technical
+debt.
+
 ## 6. Remaining technical debt
 
 What's still broken or fragile after your changes? Be specific - this is
@@ -86,6 +108,9 @@ more useful to us than a clean-sounding summary.
 
 - Add an automated OpenAPI assertion ensuring protected operations retain the
   `bearer` requirement while public operations do not.
+- Wrap each balance mutation, transaction record, ledger entry, and outbox event
+  in one MongoDB transaction so downstream write failures cannot leave partial
+  financial state.
 
 ## 7. What would you improve with another day?
 
