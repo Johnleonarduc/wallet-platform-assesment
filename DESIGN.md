@@ -27,6 +27,10 @@ etc.).
   service called RabbitMQ inside the MongoDB transaction callback. RabbitMQ
   cannot participate in that transaction, so an event could survive even if a
   later database write or commit rolled back the sender debit.
+- **Duplicate transfer events credited receivers repeatedly.** The consumer
+  performed an unconditional read/add/save and wrote the credit transaction,
+  ledger entry, and transfer status independently. It also acknowledged every
+  exception, permanently discarding transient failures.
 
 ## 2. What did you prioritize, and why?
 
@@ -55,6 +59,10 @@ the original ordering could create money: a receiver might be credited from an
 event whose sender debit never committed. This reuses existing infrastructure
 and removes RabbitMQ from the request path.
 
+I next made settlement transactional and idempotent because outbox delivery is
+at least once by design. Without this guarantee, a normal relay retry could
+create money by crediting the receiver twice.
+
 ## 3. How did you handle concurrency?
 
 Where in the system can two requests race each other? What did you change,
@@ -75,6 +83,12 @@ balance, regardless of request interleaving. A real integration test runs ten
 simultaneous withdrawals and verifies that the final balance is non-negative
 and exactly reconciles with the successful responses.
 
+Settlement atomically claims only a matching `PENDING` transfer inside the same
+MongoDB transaction as the receiver balance increment, credit transaction, and
+ledger entry. Concurrent or repeated deliveries observe `COMPLETED` and become
+no-ops. A real MongoDB test delivers the same event twice and verifies one
+credit, one transaction, and one ledger entry.
+
 ## 4. How did you ensure data consistency?
 
 Specifically: across MongoDB writes, the cache, and the message queue. Where
@@ -89,6 +103,11 @@ transfer, debit transaction, and ledger entry. These records commit or roll
 back together. The relay publishes only durable outbox records after commit.
 An integration test verifies both the outbox record and eventual receiver
 credit.
+
+Transient consumer failures are now negatively acknowledged and requeued.
+Malformed JSON or invalid event identities are acknowledged after logging so a
+poison message cannot loop forever. Event fields must match the stored pending
+transfer before any credit is applied.
 
 ## 5. Trade-offs
 
@@ -119,6 +138,11 @@ on the relay. The relay may publish twice if it crashes after RabbitMQ confirms
 publication but before it marks the outbox record as published. This is safe
 only when the consumer is idempotent; that consumer fix remains separate.
 
+Settlement now uses a MongoDB transaction, increasing write latency but making
+the wallet, transaction, ledger, and transfer status an atomic unit. Malformed
+events are dropped because the project has no dead-letter queue; production
+should retain them in a DLQ for investigation.
+
 ## 6. Remaining technical debt
 
 What's still broken or fragile after your changes? Be specific - this is
@@ -129,8 +153,8 @@ more useful to us than a clean-sounding summary.
 - Wrap each balance mutation, transaction record, ledger entry, and outbox event
   in one MongoDB transaction so downstream write failures cannot leave partial
   financial state.
-- Make the transfer consumer transactional and idempotent so an outbox
-  redelivery cannot credit the receiver twice.
+- Add a dead-letter queue and bounded retry/backoff policy for malformed or
+  persistently failing transfer events.
 
 ## 7. What would you improve with another day?
 

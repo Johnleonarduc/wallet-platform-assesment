@@ -1,6 +1,9 @@
 import { INestApplication } from '@nestjs/common';
 import { Connection } from 'mongoose';
+import { LedgerEntry } from '../../src/ledger/schemas/ledger-entry.schema';
 import { OutboxEvent } from '../../src/outbox/schemas/outbox-event.schema';
+import { TransferEventsConsumer } from '../../src/queue/transfer-events.consumer';
+import { Transaction, TransactionType } from '../../src/transactions/schemas/transaction.schema';
 import { Transfer } from '../../src/wallets/schemas/transfer.schema';
 import { Wallet } from '../../src/wallets/schemas/wallet.schema';
 import { createAuthenticatedRequest, createTestApp, getModel, resetDatabase } from './test-utils';
@@ -127,5 +130,49 @@ describe('Transfer flow (integration)', () => {
     expect(retry.body._id).toBe(first.body._id);
     expect(await transferModel.countDocuments({ idempotencyKey: request.idempotencyKey })).toBe(1);
     expect((await walletModel.findById(fromWallet.body._id))?.balance).toBe(70);
+  });
+
+  it('credits the receiver exactly once when a transfer event is delivered twice', async () => {
+    const walletModel = getModel(app, Wallet.name);
+    const transferModel = getModel(app, Transfer.name);
+    const transactionModel = getModel(app, Transaction.name);
+    const ledgerEntryModel = getModel(app, LedgerEntry.name);
+    const consumer = app.get(TransferEventsConsumer);
+    const fromWallet = await client
+      .post('/wallets')
+      .send({ userId: 'duplicate-sender', ownerName: 'Duplicate Sender' })
+      .expect(201);
+    const toWallet = await client
+      .post('/wallets')
+      .send({ userId: 'duplicate-receiver', ownerName: 'Duplicate Receiver' })
+      .expect(201);
+    const transfer = await transferModel.create({
+      fromWalletId: fromWallet.body._id,
+      toWalletId: toWallet.body._id,
+      amount: 25,
+      status: 'PENDING',
+      idempotencyKey: 'duplicate-delivery-test',
+    });
+    const event = {
+      transferId: transfer._id.toString(),
+      fromWalletId: fromWallet.body._id,
+      toWalletId: toWallet.body._id,
+      amount: 25,
+    };
+
+    await (consumer as any).completeTransfer(event);
+    await (consumer as any).completeTransfer(event);
+
+    const creditTransactions = await transactionModel.find({
+      transferId: transfer._id,
+      type: TransactionType.TRANSFER_IN,
+    });
+    const creditLedgerEntries = await ledgerEntryModel.find({
+      transactionId: { $in: creditTransactions.map((transaction: any) => transaction._id) },
+    });
+    expect((await walletModel.findById(toWallet.body._id))?.balance).toBe(25);
+    expect(creditTransactions).toHaveLength(1);
+    expect(creditLedgerEntries).toHaveLength(1);
+    expect((await transferModel.findById(transfer._id))?.status).toBe('COMPLETED');
   });
 });
