@@ -1,5 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import { Connection } from 'mongoose';
+import { OutboxEvent } from '../../src/outbox/schemas/outbox-event.schema';
 import { Transfer } from '../../src/wallets/schemas/transfer.schema';
 import { Wallet } from '../../src/wallets/schemas/wallet.schema';
 import { createAuthenticatedRequest, createTestApp, getModel, resetDatabase } from './test-utils';
@@ -67,6 +68,12 @@ describe('Transfer flow (integration)', () => {
 
     const receiverWallet = await walletModel.findById(toWallet.body._id);
     expect(receiverWallet?.balance).toBe(120);
+
+    const outboxEvent = await getModel(app, OutboxEvent.name).findOne({
+      routingKey: 'transfer.initiated',
+      'payload.transferId': transferResponse.body._id,
+    });
+    expect(outboxEvent).toBeTruthy();
   });
 
   it('rejects transferring more than the sender holds and leaves both wallets untouched', async () => {

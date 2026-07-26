@@ -3,7 +3,6 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { LedgerModule } from '../ledger/ledger.module';
 import { LedgerEntry, LedgerEntrySchema } from '../ledger/schemas/ledger-entry.schema';
 import { OutboxModule } from '../outbox/outbox.module';
-import { QueueModule } from '../queue/queue.module';
 import { Transaction, TransactionSchema } from '../transactions/schemas/transaction.schema';
 import { TransactionsModule } from '../transactions/transactions.module';
 import { Transfer, TransferSchema } from './schemas/transfer.schema';
@@ -21,7 +20,6 @@ import { WalletsService } from './wallets.service';
     ]),
     LedgerModule,
     OutboxModule,
-    QueueModule,
     TransactionsModule,
   ],
   controllers: [WalletsController],

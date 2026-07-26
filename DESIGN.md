@@ -23,6 +23,10 @@ etc.).
   found a read/check/mutate/save sequence, and the visible concurrency test
   reproduced the race under parallel requests. Multiple requests could approve
   against the same stale balance before any save completed.
+- **Transfer events could be published before MongoDB committed.** The transfer
+  service called RabbitMQ inside the MongoDB transaction callback. RabbitMQ
+  cannot participate in that transaction, so an event could survive even if a
+  later database write or commit rolled back the sender debit.
 
 ## 2. What did you prioritize, and why?
 
@@ -45,6 +49,11 @@ I then fixed concurrent withdrawal overspending because it violates the core
 wallet invariant. The balance check and decrement are now one conditional
 MongoDB update, making the fix small and directly enforceable by the source of
 truth.
+
+I then moved transfer publication to the existing transactional outbox because
+the original ordering could create money: a receiver might be credited from an
+event whose sender debit never committed. This reuses existing infrastructure
+and removes RabbitMQ from the request path.
 
 ## 3. How did you handle concurrency?
 
@@ -74,8 +83,12 @@ downstream consumer to disagree with the source of truth, and what (if
 anything) did you do about each?
 
 The idempotency fix prevents a retry from creating a second transfer, sender
-debit, ledger entry, or event. It does not address the separate issue of
-RabbitMQ publication occurring inside the MongoDB transaction.
+debit, ledger entry, or event. Transfer initiation now writes its
+`transfer.initiated` outbox record using the same MongoDB session as the
+transfer, debit transaction, and ledger entry. These records commit or roll
+back together. The relay publishes only durable outbox records after commit.
+An integration test verifies both the outbox record and eventual receiver
+credit.
 
 ## 5. Trade-offs
 
@@ -101,6 +114,11 @@ This focused fix does not yet make the subsequent transaction and ledger writes
 atomic with the balance update; that consistency boundary remains technical
 debt.
 
+Outbox delivery is asynchronous, so settlement gains a small delay and depends
+on the relay. The relay may publish twice if it crashes after RabbitMQ confirms
+publication but before it marks the outbox record as published. This is safe
+only when the consumer is idempotent; that consumer fix remains separate.
+
 ## 6. Remaining technical debt
 
 What's still broken or fragile after your changes? Be specific - this is
@@ -111,6 +129,8 @@ more useful to us than a clean-sounding summary.
 - Wrap each balance mutation, transaction record, ledger entry, and outbox event
   in one MongoDB transaction so downstream write failures cannot leave partial
   financial state.
+- Make the transfer consumer transactional and idempotent so an outbox
+  redelivery cannot credit the receiver twice.
 
 ## 7. What would you improve with another day?
 

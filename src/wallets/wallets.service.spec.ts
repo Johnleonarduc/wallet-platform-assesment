@@ -5,7 +5,6 @@ import { Types } from 'mongoose';
 import { LedgerService } from '../ledger/ledger.service';
 import { LedgerEntry } from '../ledger/schemas/ledger-entry.schema';
 import { OutboxService } from '../outbox/outbox.service';
-import { RabbitMQService } from '../queue/rabbitmq.service';
 import { RedisService } from '../redis/redis.service';
 import { Transaction, TransactionType } from '../transactions/schemas/transaction.schema';
 import { TransactionsService } from '../transactions/transactions.service';
@@ -22,7 +21,6 @@ describe('WalletsService', () => {
   let transactionsService: any;
   let ledgerService: any;
   let outboxService: any;
-  let rabbitMQService: any;
   let redisService: any;
 
   const mockSession = {
@@ -52,7 +50,6 @@ describe('WalletsService', () => {
     transactionsService = { create: jest.fn() };
     ledgerService = { recordCredit: jest.fn(), recordDebit: jest.fn() };
     outboxService = { enqueue: jest.fn() };
-    rabbitMQService = { publish: jest.fn() };
     redisService = {
       getCachedBalance: jest.fn(),
       setCachedBalance: jest.fn(),
@@ -73,7 +70,6 @@ describe('WalletsService', () => {
         { provide: TransactionsService, useValue: transactionsService },
         { provide: LedgerService, useValue: ledgerService },
         { provide: OutboxService, useValue: outboxService },
-        { provide: RabbitMQService, useValue: rabbitMQService },
         { provide: RedisService, useValue: redisService },
       ],
     }).compile();
@@ -269,7 +265,7 @@ describe('WalletsService', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
-    it('debits the sender, records a ledger entry, and publishes a transfer.initiated event', async () => {
+    it('debits the sender, records a ledger entry, and enqueues a transfer event transactionally', async () => {
       const { fromWallet } = mockWallets(100);
       const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
@@ -290,9 +286,10 @@ describe('WalletsService', () => {
         70,
         mockSession,
       );
-      expect(rabbitMQService.publish).toHaveBeenCalledWith(
+      expect(outboxService.enqueue).toHaveBeenCalledWith(
         'transfer.initiated',
         expect.objectContaining({ transferId: createdTransfer._id.toString(), amount: 30 }),
+        mockSession,
       );
       expect(result).toBe(createdTransfer);
     });
@@ -315,7 +312,7 @@ describe('WalletsService', () => {
       await service.transfer(dto);
 
       expect(transferModel.create).toHaveBeenCalledTimes(1);
-      expect(rabbitMQService.publish).toHaveBeenCalledTimes(1);
+      expect(outboxService.enqueue).toHaveBeenCalledTimes(1);
     });
 
     it('returns the persisted transfer after a concurrent idempotency-key conflict', async () => {
@@ -352,7 +349,7 @@ describe('WalletsService', () => {
       ).rejects.toThrow('write conflict');
 
       expect(mockSession.endSession).toHaveBeenCalled();
-      expect(rabbitMQService.publish).not.toHaveBeenCalled();
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
   });
 });

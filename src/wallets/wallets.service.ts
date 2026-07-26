@@ -4,7 +4,6 @@ import { Connection, Model } from 'mongoose';
 import { LedgerEntry, LedgerEntryDocument } from '../ledger/schemas/ledger-entry.schema';
 import { LedgerService } from '../ledger/ledger.service';
 import { OutboxService } from '../outbox/outbox.service';
-import { RabbitMQService } from '../queue/rabbitmq.service';
 import { RedisService } from '../redis/redis.service';
 import { TransactionsService } from '../transactions/transactions.service';
 import {
@@ -31,7 +30,6 @@ export class WalletsService {
     private readonly transactionsService: TransactionsService,
     private readonly ledgerService: LedgerService,
     private readonly outboxService: OutboxService,
-    private readonly rabbitMQService: RabbitMQService,
     private readonly redisService: RedisService,
   ) {}
 
@@ -208,12 +206,16 @@ export class WalletsService {
           session,
         );
 
-        await this.rabbitMQService.publish('transfer.initiated', {
-          transferId: transfer._id.toString(),
-          fromWalletId: fromWallet._id.toString(),
-          toWalletId: toWallet._id.toString(),
-          amount: dto.amount,
-        });
+        await this.outboxService.enqueue(
+          'transfer.initiated',
+          {
+            transferId: transfer._id.toString(),
+            fromWalletId: fromWallet._id.toString(),
+            toWalletId: toWallet._id.toString(),
+            amount: dto.amount,
+          },
+          session,
+        );
       });
     } catch (error) {
       if (dto.idempotencyKey && this.isDuplicateKeyError(error)) {
