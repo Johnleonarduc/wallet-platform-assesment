@@ -10,15 +10,23 @@ List everything you identified, whether or not you fixed it. Include how you
 found each one (code reading, a failing test, reproducing it under load,
 etc.).
 
--
--
--
+- **Swagger did not send JWT credentials to protected endpoints.** Code tracing
+  showed that `DocumentBuilder.addBearerAuth()` registered a scheme, but the
+  wallet and transaction operations had no matching OpenAPI security
+  requirement. Swagger stored the token but did not attach an
+  `Authorization: Bearer <token>` header to "Try it out" requests.
 
 ## 2. What did you prioritize, and why?
 
 Of everything above, what did you actually spend your time on? What's your
 reasoning - severity, blast radius, how common the trigger condition is,
 how cheap the fix was, something else?
+
+I first fixed Swagger authentication because it blocked manual exploration and
+review of every protected endpoint. I named the bearer scheme `bearer` and
+applied `@ApiBearerAuth('bearer')` only to the protected wallet and transaction
+controllers. Login and health remain visibly public. TypeScript compilation,
+ESLint, and whitespace validation passed.
 
 ## 3. How did you handle concurrency?
 
@@ -41,10 +49,19 @@ What did your fixes cost - complexity, latency, throughput, code
 readability, backward compatibility? Where did you choose a simpler, more
 conservative fix over a more complete one, and why?
 
+The Swagger change affects documentation metadata only; it does not alter the
+runtime JWT guard or HTTP API. Controller-level annotations mean future
+protected controllers must add the same decorator. A global OpenAPI security
+requirement would reduce that maintenance cost, but would present login and
+health as protected unless each public operation was explicitly overridden.
+
 ## 6. Remaining technical debt
 
 What's still broken or fragile after your changes? Be specific - this is
 more useful to us than a clean-sounding summary.
+
+- Add an automated OpenAPI assertion ensuring protected operations retain the
+  `bearer` requirement while public operations do not.
 
 ## 7. What would you improve with another day?
 
@@ -55,3 +72,8 @@ If we gave you one more full day on this, where would you spend it and why?
 Anything you assumed about requirements, scale, traffic patterns, or
 acceptable behavior that isn't spelled out in the README - state it here so
 we can evaluate your reasoning rather than guessing at it.
+
+- Swagger users paste the raw JWT into the Authorize dialog; Swagger adds the
+  `Bearer` prefix.
+- Wallet and transaction controllers are protected. Login and health are
+  intentionally public.

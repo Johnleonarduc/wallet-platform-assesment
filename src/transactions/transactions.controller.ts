@@ -1,9 +1,10 @@
 import { Controller, Get, Query } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { QueryTransactionsDto } from './dto/query-transactions.dto';
 import { TransactionsService } from './transactions.service';
 
 @ApiTags('transactions')
+@ApiBearerAuth('bearer')
 @Controller('transactions')
 export class TransactionsController {
   constructor(private readonly transactionsService: TransactionsService) {}

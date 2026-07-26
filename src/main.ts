@@ -19,7 +19,7 @@ async function bootstrap() {
     .setTitle('Wallet Platform API')
     .setDescription('Wallets, deposits, withdrawals, transfers and ledger')
     .setVersion('1.4.2')
-    .addBearerAuth()
+    .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'bearer')
     .build();
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
