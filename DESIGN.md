@@ -35,6 +35,9 @@ etc.).
   a read-through balance cache, but deposit, withdrawal, sender debit, and
   receiver credit paths never invalidated it. A cached pre-transaction balance
   remained visible until its TTL expired.
+- **Deposits and withdrawals could partially persist.** Their wallet balance,
+  transaction history, and ledger writes were independent. A later failure
+  could leave balances without matching auditable records.
 
 ## 2. What did you prioritize, and why?
 
@@ -70,6 +73,11 @@ create money by crediting the receiver twice.
 I next fixed cache freshness because customers could observe a balance that
 disagreed with MongoDB immediately after a successful operation. The change is
 bounded to invalidating affected wallet keys after balance mutations complete.
+
+I then made deposits and withdrawals transactional because balance/history
+disagreement breaks auditability and reconciliation. Both paths now include the
+balance mutation, transaction record, ledger entry, and outbox intent in one
+MongoDB transaction.
 
 ## 3. How did you handle concurrency?
 
@@ -124,6 +132,12 @@ receiver balances invalidate after settlement commits. Redis failures are
 logged rather than returned as operation failures because MongoDB may already
 contain the committed financial change.
 
+Deposit and withdrawal writes now share a MongoDB session and transaction. They
+either commit the wallet balance, transaction history, ledger entry, and domain
+event together or roll all of them back. Cache invalidation happens only after
+commit. Fault-injection integration tests prove rollback when a deposit outbox
+write or withdrawal ledger write fails.
+
 ## 5. Trade-offs
 
 What did your fixes cost - complexity, latency, throughput, code
@@ -144,9 +158,9 @@ fingerprint validation could reject reuse with different wallets or amounts.
 The atomic withdrawal update also increments the existing wallet `version`
 field. A failed conditional update needs a second read to distinguish a missing
 wallet (`404`) from insufficient funds (`400`), adding one query only on failure.
-This focused fix does not yet make the subsequent transaction and ledger writes
-atomic with the balance update; that consistency boundary remains technical
-debt.
+MongoDB transactions add latency and require the documented replica-set
+deployment. New wallet deposit/withdrawal events also add outbox and broker
+volume, but preserve a durable post-commit event boundary.
 
 Outbox delivery is asynchronous, so settlement gains a small delay and depends
 on the relay. The relay may publish twice if it crashes after RabbitMQ confirms
@@ -171,9 +185,6 @@ more useful to us than a clean-sounding summary.
 
 - Add an automated OpenAPI assertion ensuring protected operations retain the
   `bearer` requirement while public operations do not.
-- Wrap each balance mutation, transaction record, ledger entry, and outbox event
-  in one MongoDB transaction so downstream write failures cannot leave partial
-  financial state.
 - Add a dead-letter queue and bounded retry/backoff policy for malformed or
   persistently failing transfer events.
 - Add version-aware cache writes or bypass cached balance reads where strict

@@ -1,6 +1,10 @@
 import { INestApplication } from '@nestjs/common';
 import { Connection } from 'mongoose';
+import { LedgerService } from '../../src/ledger/ledger.service';
 import { LedgerEntry } from '../../src/ledger/schemas/ledger-entry.schema';
+import { OutboxService } from '../../src/outbox/outbox.service';
+import { Transaction, TransactionType } from '../../src/transactions/schemas/transaction.schema';
+import { Wallet } from '../../src/wallets/schemas/wallet.schema';
 import { createAuthenticatedRequest, createTestApp, getModel, resetDatabase } from './test-utils';
 
 describe('Wallets (integration)', () => {
@@ -88,5 +92,59 @@ describe('Wallets (integration)', () => {
       .expect(({ body }) => {
         expect(body.balance).toBe(60);
       });
+  });
+
+  it('rolls back a deposit when its outbox write fails', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'deposit-rollback', ownerName: 'Deposit Rollback' })
+      .expect(201);
+    const outboxService = app.get(OutboxService);
+    const enqueue = jest
+      .spyOn(outboxService, 'enqueue')
+      .mockRejectedValueOnce(new Error('injected outbox failure'));
+
+    try {
+      await client.post(`/wallets/${wallet.body._id}/deposit`).send({ amount: 100 }).expect(500);
+    } finally {
+      enqueue.mockRestore();
+    }
+
+    expect((await getModel(app, Wallet.name).findById(wallet.body._id))?.balance).toBe(0);
+    expect(
+      await getModel(app, Transaction.name).countDocuments({
+        walletId: wallet.body._id,
+        type: TransactionType.DEPOSIT,
+      }),
+    ).toBe(0);
+    expect(
+      await getModel(app, LedgerEntry.name).countDocuments({ walletId: wallet.body._id }),
+    ).toBe(0);
+  });
+
+  it('rolls back a withdrawal when its ledger write fails', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'withdrawal-rollback', ownerName: 'Withdrawal Rollback' })
+      .expect(201);
+    await client.post(`/wallets/${wallet.body._id}/deposit`).send({ amount: 100 }).expect(201);
+    const ledgerService = app.get(LedgerService);
+    const recordDebit = jest
+      .spyOn(ledgerService, 'recordDebit')
+      .mockRejectedValueOnce(new Error('injected ledger failure'));
+
+    try {
+      await client.post(`/wallets/${wallet.body._id}/withdraw`).send({ amount: 40 }).expect(500);
+    } finally {
+      recordDebit.mockRestore();
+    }
+
+    expect((await getModel(app, Wallet.name).findById(wallet.body._id))?.balance).toBe(100);
+    expect(
+      await getModel(app, Transaction.name).countDocuments({
+        walletId: wallet.body._id,
+        type: TransactionType.WITHDRAWAL,
+      }),
+    ).toBe(0);
   });
 });
