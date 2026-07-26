@@ -140,6 +140,15 @@ export class WalletsService {
       throw new BadRequestException('Cannot transfer to the same wallet');
     }
 
+    if (dto.idempotencyKey) {
+      const existingTransfer = await this.transferModel.findOne({
+        idempotencyKey: dto.idempotencyKey,
+      });
+      if (existingTransfer) {
+        return existingTransfer;
+      }
+    }
+
     const [fromWallet, toWallet] = await Promise.all([
       this.walletModel.findById(dto.fromWalletId),
       this.walletModel.findById(dto.toWalletId),
@@ -204,11 +213,30 @@ export class WalletsService {
           amount: dto.amount,
         });
       });
+    } catch (error) {
+      if (dto.idempotencyKey && this.isDuplicateKeyError(error)) {
+        const existingTransfer = await this.transferModel.findOne({
+          idempotencyKey: dto.idempotencyKey,
+        });
+        if (existingTransfer) {
+          return existingTransfer;
+        }
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
 
     return transfer;
+  }
+
+  private isDuplicateKeyError(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      (error as { code?: number }).code === 11000
+    );
   }
 
   async getDashboard(id: string) {

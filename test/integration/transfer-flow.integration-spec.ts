@@ -94,4 +94,31 @@ describe('Transfer flow (integration)', () => {
     expect(senderWallet?.balance).toBe(10);
     expect(receiverWallet?.balance).toBe(0);
   });
+
+  it('returns the original transfer when an idempotency key is retried', async () => {
+    const walletModel = getModel(app, Wallet.name);
+    const transferModel = getModel(app, Transfer.name);
+    const fromWallet = await client
+      .post('/wallets')
+      .send({ userId: 'retry-sender', ownerName: 'Retry Sender' })
+      .expect(201);
+    const toWallet = await client
+      .post('/wallets')
+      .send({ userId: 'retry-receiver', ownerName: 'Retry Receiver' })
+      .expect(201);
+    await client.post(`/wallets/${fromWallet.body._id}/deposit`).send({ amount: 100 }).expect(201);
+
+    const request = {
+      fromWalletId: fromWallet.body._id,
+      toWalletId: toWallet.body._id,
+      amount: 30,
+      idempotencyKey: 'integration-retry-key',
+    };
+    const first = await client.post('/wallets/transfer').send(request).expect(201);
+    const retry = await client.post('/wallets/transfer').send(request).expect(201);
+
+    expect(retry.body._id).toBe(first.body._id);
+    expect(await transferModel.countDocuments({ idempotencyKey: request.idempotencyKey })).toBe(1);
+    expect((await walletModel.findById(fromWallet.body._id))?.balance).toBe(70);
+  });
 });

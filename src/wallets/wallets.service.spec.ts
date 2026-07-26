@@ -296,6 +296,7 @@ describe('WalletsService', () => {
       const createdTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
       transferModel.create.mockResolvedValue([createdTransfer]);
       transactionModel.create.mockResolvedValue([{ _id: new Types.ObjectId() }]);
+      transferModel.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(createdTransfer);
 
       const dto = {
         fromWalletId: fromId.toString(),
@@ -308,6 +309,26 @@ describe('WalletsService', () => {
       await service.transfer(dto);
 
       expect(transferModel.create).toHaveBeenCalledTimes(1);
+      expect(rabbitMQService.publish).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns the persisted transfer after a concurrent idempotency-key conflict', async () => {
+      mockWallets(100);
+      const existingTransfer = { _id: new Types.ObjectId(), status: 'PENDING' };
+      transferModel.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce(existingTransfer);
+      transferModel.create.mockRejectedValue(
+        Object.assign(new Error('duplicate key'), { code: 11000 }),
+      );
+
+      const result = await service.transfer({
+        fromWalletId: fromId.toString(),
+        toWalletId: toId.toString(),
+        amount: 30,
+        idempotencyKey: 'concurrent-retry-key',
+      });
+
+      expect(result).toBe(existingTransfer);
+      expect(mockSession.endSession).toHaveBeenCalled();
     });
 
     it('ends the Mongo session even when the transaction fails partway through', async () => {

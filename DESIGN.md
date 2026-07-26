@@ -15,6 +15,10 @@ etc.).
   wallet and transaction operations had no matching OpenAPI security
   requirement. Swagger stored the token but did not attach an
   `Authorization: Bearer <token>` header to "Try it out" requests.
+- **Transfer retries created duplicate financial side effects.** A visible unit
+  test reproduced two transfer documents for two calls using the same
+  `idempotencyKey`. The field was stored but never queried and had no unique
+  database index, allowing repeated sender debits, ledger entries, and events.
 
 ## 2. What did you prioritize, and why?
 
@@ -28,6 +32,11 @@ applied `@ApiBearerAuth('bearer')` only to the protected wallet and transaction
 controllers. Login and health remain visibly public. TypeScript compilation,
 ESLint, and whitespace validation passed.
 
+I next fixed transfer request idempotency because a duplicate sender debit is a
+direct financial-loss risk. Normal retries now return the existing transfer. A
+unique partial MongoDB index and duplicate-key recovery protect concurrent
+retries.
+
 ## 3. How did you handle concurrency?
 
 Where in the system can two requests race each other? What did you change,
@@ -36,12 +45,22 @@ balances under any interleaving" vs. "much less likely under realistic
 load")? How did you verify it - a test, a manual load script, reasoning
 about the code?
 
+The service lookup handles sequential transfer retries, while the database
+unique index is the concurrency authority. If two requests race, only one can
+insert the key; the loser handles MongoDB error `11000` and returns the winning
+transfer after its transaction aborts. Unit tests cover both paths, and a real
+MongoDB integration test verifies one transfer and one sender debit.
+
 ## 4. How did you ensure data consistency?
 
 Specifically: across MongoDB writes, the cache, and the message queue. Where
 does the system currently allow the ledger, the cached balance, or a
 downstream consumer to disagree with the source of truth, and what (if
 anything) did you do about each?
+
+The idempotency fix prevents a retry from creating a second transfer, sender
+debit, ledger entry, or event. It does not address the separate issue of
+RabbitMQ publication occurring inside the MongoDB transaction.
 
 ## 5. Trade-offs
 
@@ -54,6 +73,11 @@ runtime JWT guard or HTTP API. Controller-level annotations mean future
 protected controllers must add the same decorator. A global OpenAPI security
 requirement would reduce that maintenance cost, but would present login and
 health as protected unless each public operation was explicitly overridden.
+
+Transfer keys remain optional for backward compatibility, so requests without
+a key are not idempotent. The unique index adds a small write and storage cost.
+A reused key currently returns the original transfer; stricter request
+fingerprint validation could reject reuse with different wallets or amounts.
 
 ## 6. Remaining technical debt
 
