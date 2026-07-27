@@ -157,6 +157,37 @@ describe('Wallets (integration)', () => {
       });
   });
 
+  it('summarizes full history while returning only ten recent dashboard activities', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'dashboard-user', ownerName: 'Dashboard User' })
+      .expect(201);
+
+    for (let index = 0; index < 12; index += 1) {
+      await client
+        .post(`/wallets/${wallet.body._id}/deposit`)
+        .send({ amount: 10, reference: `dashboard-deposit-${index}` })
+        .expect(201);
+    }
+    await client
+      .post(`/wallets/${wallet.body._id}/withdraw`)
+      .send({ amount: 20, reference: 'dashboard-withdrawal' })
+      .expect(201);
+
+    await client
+      .get(`/wallets/${wallet.body._id}/dashboard`)
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.totalDeposited).toBe(120);
+        expect(body.totalWithdrawn).toBe(20);
+        expect(body.transactionCount).toBe(13);
+        expect(body.recentActivity).toHaveLength(10);
+        expect(
+          body.recentActivity.every((item: { entries: unknown[] }) => item.entries.length === 1),
+        ).toBe(true);
+      });
+  });
+
   it('rolls back a deposit when its outbox write fails', async () => {
     const wallet = await client
       .post('/wallets')

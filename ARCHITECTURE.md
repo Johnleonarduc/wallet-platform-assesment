@@ -93,8 +93,9 @@ src/
   `transfer.initiated` event to RabbitMQ so the receiving side can be
   credited asynchronously.
 - `GET /wallets/:id` reads through Redis, falling back to MongoDB.
-- `GET /wallets/:id/dashboard` returns a wallet summary alongside its
-  transaction and ledger history.
+- `GET /wallets/:id/dashboard` aggregates totals across the full wallet history,
+  fetches only ten recent transactions, and batches their ledger entries in one
+  indexed query.
 
 ### Transactions & Ledger
 

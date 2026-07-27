@@ -62,6 +62,10 @@ etc.).
   or echoed an ID, but success logs, error logs, outbox records, RabbitMQ
   messages, and consumer logs did not include it. A single transfer therefore
   produced unrelated-looking request, relay, and settlement log entries.
+- **The wallet dashboard performed unbounded N+1 reads.** It loaded the wallet's
+  complete transaction history, then queried ledger entries once per
+  transaction before slicing the response to ten items. Its memory use and
+  query count therefore grew linearly with wallet history.
 
 ## 2. What did you prioritize, and why?
 
@@ -136,6 +140,12 @@ financial fixes still needed to be operable in production. `AsyncLocalStorage`
 keeps concurrent request contexts isolated; outbox payloads persist the ID;
 RabbitMQ publishes it as a message property; and relay, consumer, HTTP, and
 exception logs render the same identifier.
+
+I next optimized the dashboard because it was the explicit inefficient read
+path and would degrade most severely for the highest-value, longest-lived
+wallets. Totals and count now use one aggregation, recent activity is capped at
+ten in MongoDB, and all associated ledger entries are fetched in one batched
+query backed by compound indexes.
 
 ## 3. How did you handle concurrency?
 
@@ -257,6 +267,11 @@ Persisting a correlation ID slightly enlarges every outbox event and AMQP
 message. IDs supplied by callers are treated as diagnostic identifiers, not as
 authentication or idempotency data. Background work without an inbound ID gets
 a generated UUID so its logs remain traceable.
+
+The dashboard now performs a constant number of queries, but its summary
+aggregation still scans all transactions for one wallet. The existing
+`(walletId, createdAt)` index narrows that scan; very large histories could
+justify precomputed summaries or incremental materialized views later.
 
 The atomic withdrawal update also increments the existing wallet `version`
 field. A failed conditional update needs a second read to distinguish a missing

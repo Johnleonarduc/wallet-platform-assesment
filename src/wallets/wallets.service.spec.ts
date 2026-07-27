@@ -43,6 +43,7 @@ describe('WalletsService', () => {
     transactionModel = {
       create: jest.fn(),
       find: jest.fn(),
+      aggregate: jest.fn(),
     };
     ledgerEntryModel = {
       find: jest.fn(),
@@ -449,6 +450,79 @@ describe('WalletsService', () => {
 
       expect(mockSession.endSession).toHaveBeenCalled();
       expect(outboxService.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getDashboard', () => {
+    it('uses a summary aggregation and one batched ledger query for recent activity', async () => {
+      const walletId = new Types.ObjectId();
+      const firstTransaction = { _id: new Types.ObjectId(), type: TransactionType.DEPOSIT };
+      const secondTransaction = { _id: new Types.ObjectId(), type: TransactionType.WITHDRAWAL };
+      const firstEntry = {
+        _id: new Types.ObjectId(),
+        transactionId: firstTransaction._id,
+      };
+      walletModel.findById.mockResolvedValue({ _id: walletId, balance: 75 });
+      transactionModel.aggregate.mockResolvedValue([
+        { totalDeposited: 100, totalWithdrawn: 25, transactionCount: 42 },
+      ]);
+      const transactionQuery = {
+        sort: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue([firstTransaction, secondTransaction]),
+      };
+      transactionModel.find.mockReturnValue(transactionQuery);
+      const ledgerQuery = {
+        sort: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue([firstEntry]),
+      };
+      ledgerEntryModel.find.mockReturnValue(ledgerQuery);
+
+      const result = await service.getDashboard(walletId.toString());
+
+      expect(transactionModel.aggregate).toHaveBeenCalledWith([
+        { $match: { walletId } },
+        expect.objectContaining({ $group: expect.any(Object) }),
+      ]);
+      expect(transactionQuery.limit).toHaveBeenCalledWith(10);
+      expect(ledgerEntryModel.find).toHaveBeenCalledTimes(1);
+      expect(ledgerEntryModel.find).toHaveBeenCalledWith({
+        transactionId: { $in: [firstTransaction._id, secondTransaction._id] },
+      });
+      expect(result).toEqual(
+        expect.objectContaining({
+          totalDeposited: 100,
+          totalWithdrawn: 25,
+          transactionCount: 42,
+          recentActivity: [
+            { transaction: firstTransaction, entries: [firstEntry] },
+            { transaction: secondTransaction, entries: [] },
+          ],
+        }),
+      );
+    });
+
+    it('does not query ledger entries when there is no recent activity', async () => {
+      const walletId = new Types.ObjectId();
+      walletModel.findById.mockResolvedValue({ _id: walletId, balance: 0 });
+      transactionModel.aggregate.mockResolvedValue([]);
+      transactionModel.find.mockReturnValue({
+        sort: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        exec: jest.fn().mockResolvedValue([]),
+      });
+
+      const result = await service.getDashboard(walletId.toString());
+
+      expect(ledgerEntryModel.find).not.toHaveBeenCalled();
+      expect(result).toEqual(
+        expect.objectContaining({
+          totalDeposited: 0,
+          totalWithdrawn: 0,
+          transactionCount: 0,
+          recentActivity: [],
+        }),
+      );
     });
   });
 });
