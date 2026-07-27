@@ -131,8 +131,9 @@ Three interval-based workers run inside the API process:
   events for transfers that remain `PENDING` past a configurable timeout. It
   flags exhausted transfers for manual review without refunding while a valid
   settlement event may still be in flight.
-- `WalletEventsWorker` - periodically logs a balance snapshot for the most
-  recently updated wallets, for downstream monitoring dashboards.
+- `WalletEventsWorker` - periodically loads a lean projection of the most
+  recently updated wallets and emits snapshots through one process-wide event
+  listener, which is registered once and removed during shutdown.
 
 ### Redis
 

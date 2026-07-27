@@ -54,6 +54,10 @@ etc.).
   described `reference` as an idempotency key, but the service never queried it
   before changing a balance and the schema did not enforce uniqueness. Client
   retries could therefore apply the same deposit or withdrawal more than once.
+- **The wallet snapshot worker leaked event listeners.** Each ten-second tick
+  registered another listener for every recently updated wallet and never
+  removed it. `setMaxListeners(0)` hid Node's warning while listener closures
+  and worker state accumulated for the lifetime of the process.
 
 ## 2. What did you prioritize, and why?
 
@@ -116,6 +120,12 @@ move money synchronously and are also exposed to client timeout retries. A
 compound unique index on wallet, operation type, and reference is the concurrency
 authority. Replays with the same amount return without another mutation, while
 reuse with a different amount returns `409 Conflict`.
+
+I next fixed the snapshot worker leak because it matched the reported steady
+memory growth and would eventually destabilize every long-running API instance.
+The worker now owns one stable listener, emits all snapshots through one event,
+removes the listener on shutdown, prevents overlapping ticks, and uses a lean
+projected query to reduce per-tick allocation.
 
 ## 3. How did you handle concurrency?
 
@@ -221,6 +231,11 @@ new compound partial unique index requires an index rollout on existing
 deployments; duplicate historical keys must be reconciled before creation. The
 scope is wallet plus operation type, so the same reference may intentionally be
 used for one deposit and one withdrawal, but never twice for the same operation.
+
+The snapshot event is now a single internal event carrying `walletId` and
+`balance`, instead of one dynamically named event per wallet. Any undocumented
+in-process listener that depended on the old dynamic event names would need to
+adopt the payload-based event, but no such consumer exists in this repository.
 
 The atomic withdrawal update also increments the existing wallet `version`
 field. A failed conditional update needs a second read to distinguish a missing
