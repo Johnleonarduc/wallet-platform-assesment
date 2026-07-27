@@ -254,7 +254,7 @@ async function seed() {
     await WalletModel.updateOne({ _id: fromWallet._id }, { $inc: { balance: -amount } });
   }
 
-  console.log('Creating a duplicate consumer delivery (double-credited transfer)...');
+  console.log('Creating a replayed consumer delivery (credited exactly once)...');
   {
     const fromWallet = pick(wallets);
     let toWallet = pick(wallets);
@@ -289,27 +289,25 @@ async function seed() {
     });
     await WalletModel.updateOne({ _id: fromWallet._id }, { $inc: { balance: -amount } });
 
-    // The consumer received this message twice: two credit transactions/ledger
-    // entries exist for a single transfer, and the wallet balance reflects both.
-    for (let copy = 0; copy < 2; copy++) {
-      const creditTxn = await TransactionModel.create({
-        walletId: toWallet._id,
-        type: TransactionType.TRANSFER_IN,
-        amount,
-        status: TransactionStatus.COMPLETED,
-        balanceAfter: toWallet.balance + amount * (copy + 1),
-        transferId: transfer._id,
-        counterpartyWalletId: fromWallet._id,
-      });
-      await LedgerEntryModel.create({
-        transactionId: creditTxn._id,
-        walletId: toWallet._id,
-        direction: LedgerEntryDirection.CREDIT,
-        amount,
-        balanceAfter: toWallet.balance + amount * (copy + 1),
-      });
-    }
-    await WalletModel.updateOne({ _id: toWallet._id }, { $inc: { balance: amount * 2 } });
+    // A replay of the same delivery is a no-op after the transfer reaches COMPLETED,
+    // so there is only one inbound transaction, ledger credit, and balance update.
+    const creditTxn = await TransactionModel.create({
+      walletId: toWallet._id,
+      type: TransactionType.TRANSFER_IN,
+      amount,
+      status: TransactionStatus.COMPLETED,
+      balanceAfter: toWallet.balance + amount,
+      transferId: transfer._id,
+      counterpartyWalletId: fromWallet._id,
+    });
+    await LedgerEntryModel.create({
+      transactionId: creditTxn._id,
+      walletId: toWallet._id,
+      direction: LedgerEntryDirection.CREDIT,
+      amount,
+      balanceAfter: toWallet.balance + amount,
+    });
+    await WalletModel.updateOne({ _id: toWallet._id }, { $inc: { balance: amount } });
   }
 
   console.log('Creating outbox events (mix of published and pending)...');

@@ -42,6 +42,11 @@ etc.).
   and approved the sender balance before starting its transaction, then saved a
   stale in-memory wallet document. Parallel transfers could all approve against
   the same original balance.
+- **The seed data contradicted the repaired delivery invariant.** The seed
+  deliberately created two `TRANSFER_IN` transactions and credited a receiver
+  twice for one transfer. After settlement became idempotent, this fixture both
+  misrepresented expected behavior and failed against the unique
+  `(transferId, type)` transaction index with MongoDB error `11000`.
 
 ## 2. What did you prioritize, and why?
 
@@ -86,6 +91,11 @@ MongoDB transaction.
 I next fixed concurrent sender debits because transfers still had the same
 overspending class previously removed from withdrawals. The database now makes
 the funds-availability decision inside the transfer transaction.
+
+I then aligned the seed data with the repaired at-least-once delivery behavior.
+The replay fixture now represents two deliveries settling exactly once: one
+receiver credit, one inbound transaction, and one ledger entry. This keeps local
+demo data useful without encoding an incident that the current design prevents.
 
 ## 3. How did you handle concurrency?
 
@@ -152,6 +162,11 @@ either commit the wallet balance, transaction history, ledger entry, and domain
 event together or roll all of them back. Cache invalidation happens only after
 commit. Fault-injection integration tests prove rollback when a deposit outbox
 write or withdrawal ledger write fails.
+
+The seed generator now preserves the same transfer-delivery invariant as the
+runtime consumer. A full clean seed completed with 20 wallets, 516 transactions,
+516 ledger entries, and 10 transfers, and a subsequent API smoke test verified
+an asynchronous transfer changed balances from `200/0` to `125/75` exactly once.
 
 ## 5. Trade-offs
 
