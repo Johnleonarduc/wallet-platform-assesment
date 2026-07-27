@@ -71,7 +71,7 @@ export class TransactionsService {
     return { items, total, page, limit };
   }
 
-  async findByReference(reference: string) {
-    return this.transactionModel.findOne({ reference }).exec();
+  async findByReference(walletId: string, type: TransactionType, reference: string) {
+    return this.transactionModel.findOne({ walletId, type, reference }).exec();
   }
 }

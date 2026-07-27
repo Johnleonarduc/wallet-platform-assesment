@@ -169,9 +169,9 @@ describe('Transfer flow (integration)', () => {
 
     await app.get(PendingTransferWorker).sweep();
 
-    expect(
-      (await transferModel.findById(transfer._id))?.failureReason,
-    ).toBe('Recovery attempts exhausted; manual review required');
+    expect((await transferModel.findById(transfer._id))?.failureReason).toBe(
+      'Recovery attempts exhausted; manual review required',
+    );
     expect(
       await outboxModel.countDocuments({ 'payload.transferId': transfer._id.toString() }),
     ).toBe(0);

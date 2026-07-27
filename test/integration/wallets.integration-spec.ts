@@ -51,6 +51,69 @@ describe('Wallets (integration)', () => {
     expect(ledgerEntries[0].amount).toBe(200);
   });
 
+  it('applies concurrent deposit retries with the same reference exactly once', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'deposit-idempotency', ownerName: 'Deposit Idempotency' })
+      .expect(201);
+    const request = { amount: 100, reference: 'deposit-reference-1' };
+
+    const responses = await Promise.all([
+      client.post(`/wallets/${wallet.body._id}/deposit`).send(request),
+      client.post(`/wallets/${wallet.body._id}/deposit`).send(request),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([201, 201]);
+    expect((await getModel(app, Wallet.name).findById(wallet.body._id))?.balance).toBe(100);
+    expect(
+      await getModel(app, Transaction.name).countDocuments({
+        walletId: wallet.body._id,
+        type: TransactionType.DEPOSIT,
+        reference: request.reference,
+      }),
+    ).toBe(1);
+    expect(
+      await getModel(app, LedgerEntry.name).countDocuments({ walletId: wallet.body._id }),
+    ).toBe(1);
+
+    await client
+      .post(`/wallets/${wallet.body._id}/deposit`)
+      .send({ amount: 101, reference: request.reference })
+      .expect(409);
+  });
+
+  it('applies concurrent withdrawal retries with the same reference exactly once', async () => {
+    const wallet = await client
+      .post('/wallets')
+      .send({ userId: 'withdrawal-idempotency', ownerName: 'Withdrawal Idempotency' })
+      .expect(201);
+    await client.post(`/wallets/${wallet.body._id}/deposit`).send({ amount: 100 }).expect(201);
+    const request = { amount: 40, reference: 'withdrawal-reference-1' };
+
+    const responses = await Promise.all([
+      client.post(`/wallets/${wallet.body._id}/withdraw`).send(request),
+      client.post(`/wallets/${wallet.body._id}/withdraw`).send(request),
+    ]);
+
+    expect(responses.map(({ status }) => status)).toEqual([201, 201]);
+    expect((await getModel(app, Wallet.name).findById(wallet.body._id))?.balance).toBe(60);
+    expect(
+      await getModel(app, Transaction.name).countDocuments({
+        walletId: wallet.body._id,
+        type: TransactionType.WITHDRAWAL,
+        reference: request.reference,
+      }),
+    ).toBe(1);
+    expect(
+      await getModel(app, LedgerEntry.name).countDocuments({ walletId: wallet.body._id }),
+    ).toBe(2);
+
+    await client
+      .post(`/wallets/${wallet.body._id}/withdraw`)
+      .send({ amount: 41, reference: request.reference })
+      .expect(409);
+  });
+
   it('rejects a withdrawal larger than the current balance', async () => {
     const wallet = await client
       .post('/wallets')

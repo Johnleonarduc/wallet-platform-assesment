@@ -93,10 +93,7 @@ export class PendingTransferWorker implements OnModuleInit, OnModuleDestroy {
                 ],
               },
               {
-                $or: [
-                  { nextRecoveryAt: { $exists: false } },
-                  { nextRecoveryAt: { $lte: now } },
-                ],
+                $or: [{ nextRecoveryAt: { $exists: false } }, { nextRecoveryAt: { $lte: now } }],
               },
             ],
           },

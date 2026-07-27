@@ -58,4 +58,23 @@ describe('TransactionsService', () => {
 
     expect(result).toEqual({ items, total: 42, page: 2, limit: 2 });
   });
+
+  it('looks up an idempotent mutation by wallet, type, and reference', async () => {
+    const transaction = { _id: 'txn-1' };
+    const exec = jest.fn().mockResolvedValue(transaction);
+    transactionModel.findOne.mockReturnValue({ exec });
+
+    const result = await service.findByReference(
+      'wallet-1',
+      TransactionType.WITHDRAWAL,
+      'withdrawal-1',
+    );
+
+    expect(transactionModel.findOne).toHaveBeenCalledWith({
+      walletId: 'wallet-1',
+      type: TransactionType.WITHDRAWAL,
+      reference: 'withdrawal-1',
+    });
+    expect(result).toBe(transaction);
+  });
 });

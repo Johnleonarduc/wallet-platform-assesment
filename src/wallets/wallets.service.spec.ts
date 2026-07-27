@@ -47,7 +47,7 @@ describe('WalletsService', () => {
     ledgerEntryModel = {
       find: jest.fn(),
     };
-    transactionsService = { create: jest.fn() };
+    transactionsService = { create: jest.fn(), findByReference: jest.fn() };
     ledgerService = { recordCredit: jest.fn(), recordDebit: jest.fn() };
     outboxService = { enqueue: jest.fn() };
     redisService = {
@@ -201,6 +201,34 @@ describe('WalletsService', () => {
       expect(outboxService.enqueue).not.toHaveBeenCalled();
       expect(redisService.invalidateBalance).not.toHaveBeenCalled();
     });
+
+    it('returns the wallet without another mutation when a deposit reference is retried', async () => {
+      const walletId = new Types.ObjectId().toString();
+      const wallet = { _id: walletId, balance: 100 };
+      transactionsService.findByReference.mockResolvedValue({ amount: 100 });
+      walletModel.findById.mockResolvedValue(wallet);
+
+      const result = await service.deposit(walletId, { amount: 100, reference: 'deposit-1' });
+
+      expect(transactionsService.findByReference).toHaveBeenCalledWith(
+        walletId,
+        TransactionType.DEPOSIT,
+        'deposit-1',
+      );
+      expect(walletModel.findByIdAndUpdate).not.toHaveBeenCalled();
+      expect(transactionsService.create).not.toHaveBeenCalled();
+      expect(result).toBe(wallet);
+    });
+
+    it('rejects a deposit reference reused with a different amount', async () => {
+      transactionsService.findByReference.mockResolvedValue({ amount: 100 });
+
+      await expect(
+        service.deposit(new Types.ObjectId().toString(), { amount: 101, reference: 'deposit-1' }),
+      ).rejects.toThrow('Idempotency reference was already used with a different amount');
+
+      expect(walletModel.findByIdAndUpdate).not.toHaveBeenCalled();
+    });
   });
 
   describe('withdraw', () => {
@@ -254,6 +282,22 @@ describe('WalletsService', () => {
       await expect(service.withdraw('missing-id', { amount: 10 })).rejects.toThrow(
         NotFoundException,
       );
+    });
+
+    it('returns the wallet without another mutation when a withdrawal reference is retried', async () => {
+      const wallet = { _id: 'w1', balance: 60 };
+      transactionsService.findByReference.mockResolvedValue({ amount: 40 });
+      walletModel.findById.mockResolvedValue(wallet);
+
+      const result = await service.withdraw('w1', { amount: 40, reference: 'withdrawal-1' });
+
+      expect(transactionsService.findByReference).toHaveBeenCalledWith(
+        'w1',
+        TransactionType.WITHDRAWAL,
+        'withdrawal-1',
+      );
+      expect(walletModel.findOneAndUpdate).not.toHaveBeenCalled();
+      expect(result).toBe(wallet);
     });
   });
 

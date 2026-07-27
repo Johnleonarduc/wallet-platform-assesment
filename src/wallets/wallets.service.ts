@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
 import { LedgerEntry, LedgerEntryDocument } from '../ledger/schemas/ledger-entry.schema';
@@ -86,6 +92,16 @@ export class WalletsService {
   }
 
   async deposit(id: string, dto: DepositDto) {
+    if (dto.reference) {
+      const existingWallet = await this.resolveMutationRetry(
+        id,
+        TransactionType.DEPOSIT,
+        dto.amount,
+        dto.reference,
+      );
+      if (existingWallet) return existingWallet;
+    }
+
     const session = await this.connection.startSession();
     let wallet!: WalletDocument;
 
@@ -130,6 +146,17 @@ export class WalletsService {
           session,
         );
       });
+    } catch (error) {
+      if (dto.reference && this.isDuplicateKeyError(error)) {
+        const existingWallet = await this.resolveMutationRetry(
+          id,
+          TransactionType.DEPOSIT,
+          dto.amount,
+          dto.reference,
+        );
+        if (existingWallet) return existingWallet;
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
@@ -139,6 +166,16 @@ export class WalletsService {
   }
 
   async withdraw(id: string, dto: WithdrawDto) {
+    if (dto.reference) {
+      const existingWallet = await this.resolveMutationRetry(
+        id,
+        TransactionType.WITHDRAWAL,
+        dto.amount,
+        dto.reference,
+      );
+      if (existingWallet) return existingWallet;
+    }
+
     const session = await this.connection.startSession();
     let wallet!: WalletDocument;
 
@@ -188,6 +225,17 @@ export class WalletsService {
           session,
         );
       });
+    } catch (error) {
+      if (dto.reference && this.isDuplicateKeyError(error)) {
+        const existingWallet = await this.resolveMutationRetry(
+          id,
+          TransactionType.WITHDRAWAL,
+          dto.amount,
+          dto.reference,
+        );
+        if (existingWallet) return existingWallet;
+      }
+      throw error;
     } finally {
       await session.endSession();
     }
@@ -309,6 +357,26 @@ export class WalletsService {
       'code' in error &&
       (error as { code?: number }).code === 11000
     );
+  }
+
+  private async resolveMutationRetry(
+    walletId: string,
+    type: TransactionType,
+    amount: number,
+    reference: string,
+  ): Promise<WalletDocument | null> {
+    const existing = await this.transactionsService.findByReference(walletId, type, reference);
+    if (!existing) return null;
+
+    if (existing.amount !== amount) {
+      throw new ConflictException('Idempotency reference was already used with a different amount');
+    }
+
+    const wallet = await this.walletModel.findById(walletId);
+    if (!wallet) {
+      throw new NotFoundException(`Wallet ${walletId} not found`);
+    }
+    return wallet;
   }
 
   private async safeInvalidateBalance(walletId: string) {

@@ -1,15 +1,27 @@
 import * as bcrypt from 'bcrypt';
 import * as mongoose from 'mongoose';
 import { User, UserSchema } from '../../src/auth/schemas/user.schema';
-import { LedgerEntry, LedgerEntryDirection, LedgerEntrySchema } from '../../src/ledger/schemas/ledger-entry.schema';
-import { OutboxEvent, OutboxEventSchema, OutboxEventStatus } from '../../src/outbox/schemas/outbox-event.schema';
+import {
+  LedgerEntry,
+  LedgerEntryDirection,
+  LedgerEntrySchema,
+} from '../../src/ledger/schemas/ledger-entry.schema';
+import {
+  OutboxEvent,
+  OutboxEventSchema,
+  OutboxEventStatus,
+} from '../../src/outbox/schemas/outbox-event.schema';
 import {
   Transaction,
   TransactionSchema,
   TransactionStatus,
   TransactionType,
 } from '../../src/transactions/schemas/transaction.schema';
-import { Transfer, TransferSchema, TransferStatus } from '../../src/wallets/schemas/transfer.schema';
+import {
+  Transfer,
+  TransferSchema,
+  TransferStatus,
+} from '../../src/wallets/schemas/transfer.schema';
 import { Wallet, WalletSchema } from '../../src/wallets/schemas/wallet.schema';
 import { OWNER_NAMES, pick, randomInt } from './data';
 
@@ -175,7 +187,9 @@ async function seed() {
     toWallet.balance += amount;
   }
 
-  console.log('Creating stuck PENDING transfers (sender already debited, receiver never credited)...');
+  console.log(
+    'Creating stuck PENDING transfers (sender already debited, receiver never credited)...',
+  );
   for (let i = 0; i < 3; i++) {
     const fromWallet = pick(wallets);
     let toWallet = pick(wallets);

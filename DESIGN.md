@@ -50,6 +50,10 @@ etc.).
 - **The stale-transfer worker detected trapped funds but did not recover them.**
   It queried old `PENDING` transfers and only logged a count. If an outbox event
   was lost or could not be processed, the sender remained debited indefinitely.
+- **Deposit and withdrawal references did not provide idempotency.** Both DTOs
+  described `reference` as an idempotency key, but the service never queried it
+  before changing a balance and the schema did not enforce uniqueness. Client
+  retries could therefore apply the same deposit or withdrawal more than once.
 
 ## 2. What did you prioritize, and why?
 
@@ -107,6 +111,12 @@ pending and are flagged for manual review so a late valid settlement can still
 complete; automatically refunding while an event may be in flight could create
 money.
 
+I then made deposit and withdrawal references idempotent because these endpoints
+move money synchronously and are also exposed to client timeout retries. A
+compound unique index on wallet, operation type, and reference is the concurrency
+authority. Replays with the same amount return without another mutation, while
+reuse with a different amount returns `409 Conflict`.
+
 ## 3. How did you handle concurrency?
 
 Where in the system can two requests race each other? What did you change,
@@ -139,6 +149,12 @@ covered by the current balance can commit under any request interleaving. Ten
 simultaneous integration requests verify that the sender never becomes
 negative, its balance reconciles with successful requests, and the receiver
 eventually receives exactly the committed total.
+
+Deposits and withdrawals first check for an existing transaction with the same
+wallet, operation type, and reference. Concurrent requests are serialized by the
+compound unique index; the losing MongoDB transaction rolls back its balance
+change and returns the committed result. Integration tests send each operation
+twice concurrently and verify one transaction and one balance mutation.
 
 ## 4. How did you ensure data consistency?
 
@@ -178,6 +194,11 @@ runtime consumer. A full clean seed completed with 20 wallets, 516 transactions,
 516 ledger entries, and 10 transfers, and a subsequent API smoke test verified
 an asynchronous transfer changed balances from `200/0` to `125/75` exactly once.
 
+Deposit and withdrawal idempotency records are created inside the same MongoDB
+transaction as the balance, ledger, and outbox writes. A uniqueness conflict
+therefore rolls back the entire losing attempt rather than leaving a partial
+financial side effect.
+
 ## 5. Trade-offs
 
 What did your fixes cost - complexity, latency, throughput, code
@@ -194,6 +215,12 @@ Transfer keys remain optional for backward compatibility, so requests without
 a key are not idempotent. The unique index adds a small write and storage cost.
 A reused key currently returns the original transfer; stricter request
 fingerprint validation could reject reuse with different wallets or amounts.
+
+Deposit and withdrawal references also remain optional for compatibility. Their
+new compound partial unique index requires an index rollout on existing
+deployments; duplicate historical keys must be reconciled before creation. The
+scope is wallet plus operation type, so the same reference may intentionally be
+used for one deposit and one withdrawal, but never twice for the same operation.
 
 The atomic withdrawal update also increments the existing wallet `version`
 field. A failed conditional update needs a second read to distinguish a missing
