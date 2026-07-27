@@ -6,6 +6,7 @@ import { TransferEventsConsumer } from '../../src/queue/transfer-events.consumer
 import { Transaction, TransactionType } from '../../src/transactions/schemas/transaction.schema';
 import { Transfer } from '../../src/wallets/schemas/transfer.schema';
 import { Wallet } from '../../src/wallets/schemas/wallet.schema';
+import { PendingTransferWorker } from '../../src/workers/pending-transfer.worker';
 import { createAuthenticatedRequest, createTestApp, getModel, resetDatabase } from './test-utils';
 
 async function pollUntil(fn: () => Promise<boolean>, timeoutMs = 8000, intervalMs = 200) {
@@ -91,6 +92,89 @@ describe('Transfer flow (integration)', () => {
       'payload.transferId': transferResponse.body._id,
     });
     expect(outboxEvent).toBeTruthy();
+  });
+
+  it('recovers a stale pending transfer by enqueueing a new settlement event', async () => {
+    const walletModel = getModel(app, Wallet.name);
+    const transferModel = getModel(app, Transfer.name);
+    const outboxModel = getModel(app, OutboxEvent.name);
+    const sender = await walletModel.create({
+      userId: 'recovery-sender',
+      ownerName: 'Recovery Sender',
+      balance: 125,
+    });
+    const receiver = await walletModel.create({
+      userId: 'recovery-receiver',
+      ownerName: 'Recovery Receiver',
+      balance: 0,
+    });
+    const transfer = await transferModel.create({
+      fromWalletId: sender._id,
+      toWalletId: receiver._id,
+      amount: 75,
+      status: 'PENDING',
+      createdAt: new Date(Date.now() - 120_000),
+      updatedAt: new Date(Date.now() - 120_000),
+    });
+
+    const recoveryWorker = app.get(PendingTransferWorker);
+    await Promise.all([recoveryWorker.sweep(), recoveryWorker.sweep()]);
+
+    const recoveryEvent = await outboxModel.findOne({
+      routingKey: 'transfer.initiated',
+      'payload.transferId': transfer._id.toString(),
+      'payload.recoveryAttempt': 1,
+    });
+    expect(recoveryEvent).toBeTruthy();
+    expect(
+      await outboxModel.countDocuments({
+        routingKey: 'transfer.initiated',
+        'payload.transferId': transfer._id.toString(),
+      }),
+    ).toBe(1);
+    expect((await transferModel.findById(transfer._id))?.recoveryAttempts).toBe(1);
+
+    const settled = await pollUntil(async () => {
+      return (await transferModel.findById(transfer._id))?.status === 'COMPLETED';
+    });
+    expect(settled).toBe(true);
+    expect((await walletModel.findById(receiver._id))?.balance).toBe(75);
+    expect((await transferModel.findById(transfer._id))?.failureReason).toBeUndefined();
+  });
+
+  it('flags a stale transfer for manual review after recovery attempts are exhausted', async () => {
+    const walletModel = getModel(app, Wallet.name);
+    const transferModel = getModel(app, Transfer.name);
+    const outboxModel = getModel(app, OutboxEvent.name);
+    const sender = await walletModel.create({
+      userId: 'exhausted-sender',
+      ownerName: 'Exhausted Sender',
+      balance: 25,
+    });
+    const receiver = await walletModel.create({
+      userId: 'exhausted-receiver',
+      ownerName: 'Exhausted Receiver',
+      balance: 0,
+    });
+    const transfer = await transferModel.create({
+      fromWalletId: sender._id,
+      toWalletId: receiver._id,
+      amount: 25,
+      status: 'PENDING',
+      recoveryAttempts: 5,
+      nextRecoveryAt: new Date(Date.now() - 1_000),
+      createdAt: new Date(Date.now() - 120_000),
+      updatedAt: new Date(Date.now() - 120_000),
+    });
+
+    await app.get(PendingTransferWorker).sweep();
+
+    expect(
+      (await transferModel.findById(transfer._id))?.failureReason,
+    ).toBe('Recovery attempts exhausted; manual review required');
+    expect(
+      await outboxModel.countDocuments({ 'payload.transferId': transfer._id.toString() }),
+    ).toBe(0);
   });
 
   it('rejects transferring more than the sender holds and leaves both wallets untouched', async () => {

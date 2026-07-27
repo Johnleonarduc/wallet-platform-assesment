@@ -31,5 +31,13 @@ export default () => ({
       10,
     ),
     pendingTransferTimeoutMs: parseInt(process.env.PENDING_TRANSFER_TIMEOUT_MS || '60000', 10),
+    pendingTransferRecoveryIntervalMs: parseInt(
+      process.env.PENDING_TRANSFER_RECOVERY_INTERVAL_MS || '30000',
+      10,
+    ),
+    pendingTransferMaxRecoveryAttempts: parseInt(
+      process.env.PENDING_TRANSFER_MAX_RECOVERY_ATTEMPTS || '5',
+      10,
+    ),
   },
 });

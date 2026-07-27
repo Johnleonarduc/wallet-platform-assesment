@@ -47,6 +47,9 @@ etc.).
   twice for one transfer. After settlement became idempotent, this fixture both
   misrepresented expected behavior and failed against the unique
   `(transferId, type)` transaction index with MongoDB error `11000`.
+- **The stale-transfer worker detected trapped funds but did not recover them.**
+  It queried old `PENDING` transfers and only logged a count. If an outbox event
+  was lost or could not be processed, the sender remained debited indefinitely.
 
 ## 2. What did you prioritize, and why?
 
@@ -96,6 +99,13 @@ I then aligned the seed data with the repaired at-least-once delivery behavior.
 The replay fixture now represents two deliveries settling exactly once: one
 receiver credit, one inbound transaction, and one ledger entry. This keeps local
 demo data useful without encoding an incident that the current design prevents.
+
+I next made stale-transfer recovery actionable. A worker now atomically claims
+eligible stale transfers, records a new settlement event in the transactional
+outbox, spaces retries, and caps automatic attempts. Exhausted transfers remain
+pending and are flagged for manual review so a late valid settlement can still
+complete; automatically refunding while an event may be in flight could create
+money.
 
 ## 3. How did you handle concurrency?
 
@@ -222,6 +232,8 @@ more useful to us than a clean-sounding summary.
   `bearer` requirement while public operations do not.
 - Add a dead-letter queue and bounded retry/backoff policy for malformed or
   persistently failing transfer events.
+- Add an operator workflow and alert for transfers whose automatic recovery
+  attempts are exhausted.
 - Add version-aware cache writes or bypass cached balance reads where strict
   read-after-write consistency is required.
 

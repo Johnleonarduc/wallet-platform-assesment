@@ -79,7 +79,10 @@ export class TransferEventsConsumer implements OnModuleInit {
             toWalletId: event.toWalletId,
             amount: event.amount,
           },
-          { $set: { status: TransferStatus.COMPLETED } },
+          {
+            $set: { status: TransferStatus.COMPLETED },
+            $unset: { failureReason: 1, nextRecoveryAt: 1 },
+          },
           { new: true, session },
         );
 

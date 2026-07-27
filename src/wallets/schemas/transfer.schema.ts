@@ -29,6 +29,12 @@ export class Transfer {
   @Prop()
   failureReason?: string;
 
+  @Prop({ required: true, default: 0 })
+  recoveryAttempts: number;
+
+  @Prop()
+  nextRecoveryAt?: Date;
+
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -42,3 +48,5 @@ TransferSchema.index(
     partialFilterExpression: { idempotencyKey: { $type: 'string' } },
   },
 );
+
+TransferSchema.index({ status: 1, createdAt: 1, nextRecoveryAt: 1 });

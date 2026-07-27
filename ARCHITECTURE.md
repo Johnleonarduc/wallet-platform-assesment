@@ -127,8 +127,10 @@ records the corresponding transaction/ledger entry, and marks the transfer
 Three interval-based workers run inside the API process:
 
 - `OutboxRelayWorker` - drains pending outbox events to RabbitMQ.
-- `PendingTransferWorker` - periodically scans for transfers that have been
-  `PENDING` past a configurable timeout.
+- `PendingTransferWorker` - transactionally enqueues spaced, bounded recovery
+  events for transfers that remain `PENDING` past a configurable timeout. It
+  flags exhausted transfers for manual review without refunding while a valid
+  settlement event may still be in flight.
 - `WalletEventsWorker` - periodically logs a balance snapshot for the most
   recently updated wallets, for downstream monitoring dashboards.
 
