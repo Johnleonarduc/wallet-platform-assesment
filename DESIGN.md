@@ -1,331 +1,194 @@
 # Design Notes
 
-Fill this in as part of your submission. We'd rather read a clear, honest
-account of a partial fix than a vague description of a complete one. Bullet
-points are fine; prose is fine. Aim for signal over length.
-
 ## 1. What issues did you find?
 
-List everything you identified, whether or not you fixed it. Include how you
-found each one (code reading, a failing test, reproducing it under load,
-etc.).
+I found four main classes of problems.
 
-- **Swagger did not send JWT credentials to protected endpoints.** Code tracing
-  showed that `DocumentBuilder.addBearerAuth()` registered a scheme, but the
-  wallet and transaction operations had no matching OpenAPI security
-  requirement. Swagger stored the token but did not attach an
-  `Authorization: Bearer <token>` header to "Try it out" requests.
-- **Transfer retries created duplicate financial side effects.** A visible unit
-  test reproduced two transfer documents for two calls using the same
-  `idempotencyKey`. The field was stored but never queried and had no unique
-  database index, allowing repeated sender debits, ledger entries, and events.
-- **Concurrent withdrawals could make a wallet negative.** Code inspection
-  found a read/check/mutate/save sequence, and the visible concurrency test
-  reproduced the race under parallel requests. Multiple requests could approve
-  against the same stale balance before any save completed.
-- **Transfer events could be published before MongoDB committed.** The transfer
-  service called RabbitMQ inside the MongoDB transaction callback. RabbitMQ
-  cannot participate in that transaction, so an event could survive even if a
-  later database write or commit rolled back the sender debit.
-- **Duplicate transfer events credited receivers repeatedly.** The consumer
-  performed an unconditional read/add/save and wrote the credit transaction,
-  ledger entry, and transfer status independently. It also acknowledged every
-  exception, permanently discarding transient failures.
-- **Balance reads returned stale Redis values after writes.** `getWallet()` used
-  a read-through balance cache, but deposit, withdrawal, sender debit, and
-  receiver credit paths never invalidated it. A cached pre-transaction balance
-  remained visible until its TTL expired.
-- **Deposits and withdrawals could partially persist.** Their wallet balance,
-  transaction history, and ledger writes were independent. A later failure
-  could leave balances without matching auditable records.
-- **Concurrent transfers could overspend a sender.** Transfer initiation read
-  and approved the sender balance before starting its transaction, then saved a
-  stale in-memory wallet document. Parallel transfers could all approve against
-  the same original balance.
-- **The seed data contradicted the repaired delivery invariant.** The seed
-  deliberately created two `TRANSFER_IN` transactions and credited a receiver
-  twice for one transfer. After settlement became idempotent, this fixture both
-  misrepresented expected behavior and failed against the unique
-  `(transferId, type)` transaction index with MongoDB error `11000`.
-- **The stale-transfer worker detected trapped funds but did not recover them.**
-  It queried old `PENDING` transfers and only logged a count. If an outbox event
-  was lost or could not be processed, the sender remained debited indefinitely.
-- **Deposit and withdrawal references did not provide idempotency.** Both DTOs
-  described `reference` as an idempotency key, but the service never queried it
-  before changing a balance and the schema did not enforce uniqueness. Client
-  retries could therefore apply the same deposit or withdrawal more than once.
-- **The wallet snapshot worker leaked event listeners.** Each ten-second tick
-  registered another listener for every recently updated wallet and never
-  removed it. `setMaxListeners(0)` hid Node's warning while listener closures
-  and worker state accumulated for the lifetime of the process.
-- **Correlation IDs stopped at the HTTP response header.** Middleware generated
-  or echoed an ID, but success logs, error logs, outbox records, RabbitMQ
-  messages, and consumer logs did not include it. A single transfer therefore
-  produced unrelated-looking request, relay, and settlement log entries.
-- **The wallet dashboard performed unbounded N+1 reads.** It loaded the wallet's
-  complete transaction history, then queried ledger entries once per
-  transaction before slicing the response to ten items. Its memory use and
-  query count therefore grew linearly with wallet history.
+### Financial correctness
+
+- Withdrawals and transfers used read/check/save sequences, so concurrent
+  requests could approve against the same balance and make a wallet negative.
+- Deposit, withdrawal, and transfer retries could repeat financial side effects.
+  The supplied reference/idempotency fields were stored but not enforced.
+- Deposit and withdrawal balance changes, transaction records, and ledger
+  entries were separate writes. A later failure could leave them inconsistent.
+- Transfer settlement updated the receiver, transaction, ledger, and transfer
+  status independently. Duplicate delivery could credit the receiver twice.
+
+I confirmed these through code reading, the visible tests, and real concurrent
+integration requests against MongoDB.
+
+### Database/message consistency
+
+- Transfer events were published inside a MongoDB transaction callback.
+  RabbitMQ cannot join that transaction, so an event could survive a rollback.
+- The outbox relay can publish the same event more than once if it crashes after
+  broker confirmation but before marking the record published. The consumer was
+  not safe under that delivery model.
+- The stale-transfer worker only logged old `PENDING` transfers. It did not
+  recover them, so a debited sender could have funds trapped indefinitely.
+- The seed script still modelled double-credit delivery after settlement had
+  been made idempotent. It exposed this mismatch by failing on a unique index.
+
+### Runtime and operability
+
+- Redis balances were not invalidated after writes, so customers could see old
+  balances until TTL expiry.
+- The wallet snapshot worker added listeners every ten seconds and never removed
+  them. `setMaxListeners(0)` hid the warning rather than fixing the leak.
+- Correlation IDs stopped at the HTTP response. Request, relay, RabbitMQ, and
+  consumer logs could not be tied to the same transfer.
+
+### API and query behaviour
+
+- Swagger registered bearer authentication but did not mark protected operations
+  as requiring it, so "Try it out" omitted the token.
+- The dashboard loaded the complete transaction history, queried ledger entries
+  once per transaction, and only then sliced to ten results. Query count and
+  memory use grew with wallet history.
 
 ## 2. What did you prioritize, and why?
 
-Of everything above, what did you actually spend your time on? What's your
-reasoning - severity, blast radius, how common the trigger condition is,
-how cheap the fix was, something else?
+I prioritized anything that could create, lose, or trap money. That meant
+negative balances, retry idempotency, transaction/ledger atomicity, the
+MongoDB/RabbitMQ commit gap, duplicate settlement, and stale transfers came
+before performance or observability.
 
-I first fixed Swagger authentication because it blocked manual exploration and
-review of every protected endpoint. I named the bearer scheme `bearer` and
-applied `@ApiBearerAuth('bearer')` only to the protected wallet and transaction
-controllers. Login and health remain visibly public. TypeScript compilation,
-ESLint, and whitespace validation passed.
+The key design choice was to make MongoDB the authority for concurrency rather
+than relying on checks in application memory. Conditional updates enforce
+available funds; unique partial indexes enforce idempotency; and MongoDB
+transactions keep each financial state transition together.
 
-I next fixed transfer request idempotency because a duplicate sender debit is a
-direct financial-loss risk. Normal retries now return the existing transfer. A
-unique partial MongoDB index and duplicate-key recovery protect concurrent
-retries.
+I used the existing outbox rather than adding a new messaging abstraction.
+Transfer initiation now commits the sender debit and event intent together, and
+the consumer is safe when the relay publishes twice. For stale transfers, I
+chose bounded replay over automatic refunds. A settlement may still be in
+flight, so refunding could put money back with the sender and later credit the
+receiver as well.
 
-I then fixed concurrent withdrawal overspending because it violates the core
-wallet invariant. The balance check and decrement are now one conditional
-MongoDB update, making the fix small and directly enforceable by the source of
-truth.
-
-I then moved transfer publication to the existing transactional outbox because
-the original ordering could create money: a receiver might be credited from an
-event whose sender debit never committed. This reuses existing infrastructure
-and removes RabbitMQ from the request path.
-
-I next made settlement transactional and idempotent because outbox delivery is
-at least once by design. Without this guarantee, a normal relay retry could
-create money by crediting the receiver twice.
-
-I next fixed cache freshness because customers could observe a balance that
-disagreed with MongoDB immediately after a successful operation. The change is
-bounded to invalidating affected wallet keys after balance mutations complete.
-
-I then made deposits and withdrawals transactional because balance/history
-disagreement breaks auditability and reconciliation. Both paths now include the
-balance mutation, transaction record, ledger entry, and outbox intent in one
-MongoDB transaction.
-
-I next fixed concurrent sender debits because transfers still had the same
-overspending class previously removed from withdrawals. The database now makes
-the funds-availability decision inside the transfer transaction.
-
-I then aligned the seed data with the repaired at-least-once delivery behavior.
-The replay fixture now represents two deliveries settling exactly once: one
-receiver credit, one inbound transaction, and one ledger entry. This keeps local
-demo data useful without encoding an incident that the current design prevents.
-
-I next made stale-transfer recovery actionable. A worker now atomically claims
-eligible stale transfers, records a new settlement event in the transactional
-outbox, spaces retries, and caps automatic attempts. Exhausted transfers remain
-pending and are flagged for manual review so a late valid settlement can still
-complete; automatically refunding while an event may be in flight could create
-money.
-
-I then made deposit and withdrawal references idempotent because these endpoints
-move money synchronously and are also exposed to client timeout retries. A
-compound unique index on wallet, operation type, and reference is the concurrency
-authority. Replays with the same amount return without another mutation, while
-reuse with a different amount returns `409 Conflict`.
-
-I next fixed the snapshot worker leak because it matched the reported steady
-memory growth and would eventually destabilize every long-running API instance.
-The worker now owns one stable listener, emits all snapshots through one event,
-removes the listener on shutdown, prevents overlapping ticks, and uses a lean
-projected query to reduce per-tick allocation.
-
-I then propagated correlation IDs across the asynchronous boundary because the
-financial fixes still needed to be operable in production. `AsyncLocalStorage`
-keeps concurrent request contexts isolated; outbox payloads persist the ID;
-RabbitMQ publishes it as a message property; and relay, consumer, HTTP, and
-exception logs render the same identifier.
-
-I next optimized the dashboard because it was the explicit inefficient read
-path and would degrade most severely for the highest-value, longest-lived
-wallets. Totals and count now use one aggregation, recent activity is capped at
-ten in MongoDB, and all associated ledger entries are fetched in one batched
-query backed by compound indexes.
+Once the financial paths were stable, I addressed the concrete operational
+reports: stale cache values, listener growth, uncorrelated logs, and the
+dashboard N+1 query. I also fixed Swagger early because it made manual review of
+the protected API unnecessarily difficult.
 
 ## 3. How did you handle concurrency?
 
-Where in the system can two requests race each other? What did you change,
-and what guarantee does your fix actually provide (e.g. "no negative
-balances under any interleaving" vs. "much less likely under realistic
-load")? How did you verify it - a test, a manual load script, reasoning
-about the code?
+Withdrawals and sender-side transfers now use conditional atomic updates with
+`balance >= amount` and a negative `$inc`. Under any interleaving, MongoDB only
+allows operations covered by the current committed balance. Integration tests
+run ten simultaneous withdrawals and ten simultaneous transfers, then reconcile
+the final balance with successful responses.
 
-The service lookup handles sequential transfer retries, while the database
-unique index is the concurrency authority. If two requests race, only one can
-insert the key; the loser handles MongoDB error `11000` and returns the winning
-transfer after its transaction aborts. Unit tests cover both paths, and a real
-MongoDB integration test verifies one transfer and one sender debit.
+Transfer, deposit, and withdrawal idempotency is backed by unique partial
+indexes rather than a service-level lookup alone. A sequential retry returns the
+existing result. If two first attempts race, one insert wins; the losing MongoDB
+transaction rolls back its tentative balance change and returns the committed
+record. Reusing a deposit or withdrawal reference with a different amount
+returns `409 Conflict`.
 
-Withdrawals now use `findOneAndUpdate` with `balance >= amount` and an atomic
-negative `$inc`. MongoDB permits only the withdrawals covered by the current
-balance, regardless of request interleaving. A real integration test runs ten
-simultaneous withdrawals and verifies that the final balance is non-negative
-and exactly reconciles with the successful responses.
+Settlement atomically changes a matching transfer from `PENDING` to `COMPLETED`
+inside the same transaction as the receiver credit, inbound transaction, and
+ledger entry. A concurrent or repeated delivery sees `COMPLETED` and becomes a
+no-op. The real integration test delivers the same event twice and observes one
+credit.
 
-Settlement atomically claims only a matching `PENDING` transfer inside the same
-MongoDB transaction as the receiver balance increment, credit transaction, and
-ledger entry. Concurrent or repeated deliveries observe `COMPLETED` and become
-no-ops. A real MongoDB test delivers the same event twice and verifies one
-credit, one transaction, and one ledger entry.
-
-Transfer initiation now conditionally decrements the sender with
-`balance >= amount` and `$inc` inside the MongoDB transaction. Only transfers
-covered by the current balance can commit under any request interleaving. Ten
-simultaneous integration requests verify that the sender never becomes
-negative, its balance reconciles with successful requests, and the receiver
-eventually receives exactly the committed total.
-
-Deposits and withdrawals first check for an existing transaction with the same
-wallet, operation type, and reference. Concurrent requests are serialized by the
-compound unique index; the losing MongoDB transaction rolls back its balance
-change and returns the committed result. Integration tests send each operation
-twice concurrently and verify one transaction and one balance mutation.
+Stale-transfer recovery also claims work transactionally. Concurrent sweepers
+enqueue one recovery attempt, space later attempts with `nextRecoveryAt`, and
+stop after a configured limit.
 
 ## 4. How did you ensure data consistency?
 
-Specifically: across MongoDB writes, the cache, and the message queue. Where
-does the system currently allow the ledger, the cached balance, or a
-downstream consumer to disagree with the source of truth, and what (if
-anything) did you do about each?
+MongoDB remains the financial source of truth. Deposit, withdrawal, and transfer
+initiation each commit the balance mutation, transaction record, ledger entry,
+and outbox intent in one MongoDB transaction. Settlement does the equivalent for
+the receiving side. Fault-injection tests verify rollback when ledger or outbox
+writes fail.
 
-The idempotency fix prevents a retry from creating a second transfer, sender
-debit, ledger entry, or event. Transfer initiation now writes its
-`transfer.initiated` outbox record using the same MongoDB session as the
-transfer, debit transaction, and ledger entry. These records commit or roll
-back together. The relay publishes only durable outbox records after commit.
-An integration test verifies both the outbox record and eventual receiver
-credit.
+RabbitMQ delivery is treated as at least once. The outbox closes the pre-commit
+publication gap, while the consumer makes repeated publication safe. Transient
+consumer failures are negatively acknowledged and requeued. Malformed or
+mismatched events are logged and acknowledged so they do not poison-loop; a DLQ
+is still needed for durable investigation.
 
-Transient consumer failures are now negatively acknowledged and requeued.
-Malformed JSON or invalid event identities are acknowledged after logging so a
-poison message cannot loop forever. Event fields must match the stored pending
-transfer before any credit is applied.
+Redis is a disposable read-through cache. Successful balance mutations
+invalidate the affected key only after commit. Invalidation failures are logged
+instead of changing a successful financial response, because MongoDB may already
+contain the committed result. A narrow cache-aside race remains and is documented
+below.
 
-MongoDB remains authoritative and Redis now acts only as a disposable
-read-through cache. Deposits and withdrawals invalidate after their successful
-write sequence; sender transfer balances invalidate after initiation commits;
-receiver balances invalidate after settlement commits. Redis failures are
-logged rather than returned as operation failures because MongoDB may already
-contain the committed financial change.
+Correlation IDs are stored in the transactional outbox payload, restored by the
+relay, copied into AMQP properties, and restored again by the consumer. This
+keeps one identifier across an HTTP request and delayed asynchronous settlement.
 
-Deposit and withdrawal writes now share a MongoDB session and transaction. They
-either commit the wallet balance, transaction history, ledger entry, and domain
-event together or roll all of them back. Cache invalidation happens only after
-commit. Fault-injection integration tests prove rollback when a deposit outbox
-write or withdrawal ledger write fails.
-
-The seed generator now preserves the same transfer-delivery invariant as the
-runtime consumer. A full clean seed completed with 20 wallets, 516 transactions,
-516 ledger entries, and 10 transfers, and a subsequent API smoke test verified
-an asynchronous transfer changed balances from `200/0` to `125/75` exactly once.
-
-Deposit and withdrawal idempotency records are created inside the same MongoDB
-transaction as the balance, ledger, and outbox writes. A uniqueness conflict
-therefore rolls back the entire losing attempt rather than leaving a partial
-financial side effect.
-
-Correlation is written into the transactional outbox payload, so it survives
-process restarts and relay delay alongside the event itself. The relay restores
-that context before publishing and the consumer restores it before settlement.
-An integration assertion verifies that a caller-supplied HTTP correlation ID is
-present on the resulting transfer outbox event.
+The verification suite covers concurrency, duplicate requests and events,
+transaction rollback, cache freshness, stale-transfer recovery, RabbitMQ,
+dashboard aggregation, and HTTP authentication. The final run passed 43 unit,
+19 integration, and 2 e2e tests. A clean seed produced 20 wallets, 516
+transactions, 516 ledger entries, and 10 transfers.
 
 ## 5. Trade-offs
 
-What did your fixes cost - complexity, latency, throughput, code
-readability, backward compatibility? Where did you choose a simpler, more
-conservative fix over a more complete one, and why?
-
-The Swagger change affects documentation metadata only; it does not alter the
-runtime JWT guard or HTTP API. Controller-level annotations mean future
-protected controllers must add the same decorator. A global OpenAPI security
-requirement would reduce that maintenance cost, but would present login and
-health as protected unless each public operation was explicitly overridden.
-
-Transfer keys remain optional for backward compatibility, so requests without
-a key are not idempotent. The unique index adds a small write and storage cost.
-A reused key currently returns the original transfer; stricter request
-fingerprint validation could reject reuse with different wallets or amounts.
-
-Deposit and withdrawal references also remain optional for compatibility. Their
-new compound partial unique index requires an index rollout on existing
-deployments; duplicate historical keys must be reconciled before creation. The
-scope is wallet plus operation type, so the same reference may intentionally be
-used for one deposit and one withdrawal, but never twice for the same operation.
-
-The snapshot event is now a single internal event carrying `walletId` and
-`balance`, instead of one dynamically named event per wallet. Any undocumented
-in-process listener that depended on the old dynamic event names would need to
-adopt the payload-based event, but no such consumer exists in this repository.
-
-Persisting a correlation ID slightly enlarges every outbox event and AMQP
-message. IDs supplied by callers are treated as diagnostic identifiers, not as
-authentication or idempotency data. Background work without an inbound ID gets
-a generated UUID so its logs remain traceable.
-
-The dashboard now performs a constant number of queries, but its summary
-aggregation still scans all transactions for one wallet. The existing
-`(walletId, createdAt)` index narrows that scan; very large histories could
-justify precomputed summaries or incremental materialized views later.
-
-The atomic withdrawal update also increments the existing wallet `version`
-field. A failed conditional update needs a second read to distinguish a missing
-wallet (`404`) from insufficient funds (`400`), adding one query only on failure.
-MongoDB transactions add latency and require the documented replica-set
-deployment. New wallet deposit/withdrawal events also add outbox and broker
-volume, but preserve a durable post-commit event boundary.
-
-Conditional sender updates can contend on a high-traffic wallet, causing
-MongoDB transaction retries and lower throughput. That cost is preferable to
-overspending. Destination existence requires an additional transactional query
-because the stale pre-transaction wallet reads were removed.
-
-Outbox delivery is asynchronous, so settlement gains a small delay and depends
-on the relay. The relay may publish twice if it crashes after RabbitMQ confirms
-publication but before it marks the outbox record as published. This is safe
-only when the consumer is idempotent; that consumer fix remains separate.
-
-Settlement now uses a MongoDB transaction, increasing write latency but making
-the wallet, transaction, ledger, and transfer status an atomic unit. Malformed
-events are dropped because the project has no dead-letter queue; production
-should retain them in a DLQ for investigation.
-
-Invalidation adds a Redis round trip to successful writes. Best-effort handling
-avoids misleading clients with an error after a committed MongoDB write, but a
-failed invalidation can leave stale data until TTL expiry. There is also a narrow
-cache-aside race where a reader can fetch an old MongoDB value before a commit,
-then populate Redis after invalidation; versioned cache values would close it.
+- Idempotency keys remain optional for backward compatibility. Requests without
+  them cannot be made safe against client retries. New unique indexes require a
+  controlled rollout, including reconciliation of historical duplicates.
+- MongoDB transactions and conditional updates add latency and may increase
+  contention on high-traffic wallets. I accepted that cost to protect balances
+  and audit records.
+- Settlement is asynchronous. The relay can still publish twice at its
+  confirmation/mark-published boundary, so consumer idempotency is required.
+- Recovery leaves exhausted transfers `PENDING` and flags them for manual review.
+  This is less automatic than refunding, but it avoids creating money when an
+  event is merely delayed.
+- Cache invalidation adds a Redis round trip. Best-effort handling can leave a
+  stale value until TTL expiry, and a reader can still repopulate an old value in
+  a narrow race around commit/invalidation.
+- The dashboard now performs a constant number of queries, but its summary
+  aggregation still scans one wallet's indexed transaction history. Very large
+  histories may eventually need materialized summaries.
+- The snapshot worker now uses one payload-based internal event instead of a
+  dynamically named event per wallet. No repository consumer used the old names,
+  but an undocumented in-process consumer would need to migrate.
+- Persisting correlation IDs slightly enlarges outbox and AMQP payloads. They are
+  diagnostic identifiers only, not authentication or idempotency inputs.
+- MongoDB transactions require a replica set, including in local development;
+  the Docker Compose configuration documents and provides this.
 
 ## 6. Remaining technical debt
 
-What's still broken or fragile after your changes? Be specific - this is
-more useful to us than a clean-sounding summary.
-
-- Add an automated OpenAPI assertion ensuring protected operations retain the
-  `bearer` requirement while public operations do not.
-- Add a dead-letter queue and bounded retry/backoff policy for malformed or
-  persistently failing transfer events.
-- Add an operator workflow and alert for transfers whose automatic recovery
-  attempts are exhausted.
-- Add version-aware cache writes or bypass cached balance reads where strict
-  read-after-write consistency is required.
+- Add a transfer DLQ with bounded retry/backoff and durable poison-message
+  inspection.
+- Add an operator workflow and alert for transfers that exhaust recovery.
+- Close the remaining cache-aside race with version-aware cache writes or a
+  stricter balance read path.
+- Add metrics for outbox lag, settlement latency, retries, and recovery
+  exhaustion.
+- Add an automated OpenAPI assertion so protected operations retain the bearer
+  requirement.
+- Rehearse the new index creation against production-shaped data before rollout.
 
 ## 7. What would you improve with another day?
 
-If we gave you one more full day on this, where would you spend it and why?
+I would start with the DLQ and bounded retry policy because the current consumer
+either requeues indefinitely or acknowledges malformed input after logging. I
+would retain correlation and failure metadata so an operator could inspect and
+replay a message safely.
+
+Next, I would build the operator path for exhausted transfers: alerting, a
+protected inspection endpoint, and an audited replay/reconcile action. I would
+not add automatic refunds without a stronger guarantee that no settlement is in
+flight.
+
+With the remaining time, I would add operational metrics and close the Redis
+race for clients that require strict read-after-write balances.
 
 ## 8. Assumptions
 
-Anything you assumed about requirements, scale, traffic patterns, or
-acceptable behavior that isn't spelled out in the README - state it here so
-we can evaluate your reasoning rather than guessing at it.
-
-- Swagger users paste the raw JWT into the Authorize dialog; Swagger adds the
-  `Bearer` prefix.
-- Wallet and transaction controllers are protected. Login and health are
-  intentionally public.
+- MongoDB is the source of truth and runs as a replica set.
+- RabbitMQ delivery is at least once; duplicate publication is normal.
+- Transfer settlement may be delayed, but a committed sender debit must
+  eventually settle or become visible to an operator.
+- Client-provided idempotency keys identify one logical operation. Reusing a key
+  with a different deposit or withdrawal amount is an error.
+- Redis failure must not undo or misreport a committed MongoDB operation.
+- Login and health are public; wallet and transaction endpoints are protected.
+- Swagger users provide the raw JWT and Swagger adds the `Bearer` prefix.
