@@ -8,6 +8,7 @@ import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { CorrelationIdMiddleware } from './common/middleware/correlation-id.middleware';
+import { CommonModule } from './common/common.module';
 import configuration from './config/configuration';
 import { HealthModule } from './health/health.module';
 import { LedgerModule } from './ledger/ledger.module';
@@ -21,6 +22,7 @@ import { WorkersModule } from './workers/workers.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true, load: [configuration] }),
+    CommonModule,
     MongooseModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

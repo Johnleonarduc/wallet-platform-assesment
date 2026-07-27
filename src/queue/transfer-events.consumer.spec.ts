@@ -1,6 +1,7 @@
 import { getConnectionToken, getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Types } from 'mongoose';
+import { CorrelationIdService } from '../common/correlation-id.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { RedisService } from '../redis/redis.service';
 import { Transaction, TransactionType } from '../transactions/schemas/transaction.schema';
@@ -45,6 +46,7 @@ describe('TransferEventsConsumer', () => {
         { provide: getModelToken(Transaction.name), useValue: transactionModel },
         { provide: LedgerService, useValue: ledgerService },
         { provide: RedisService, useValue: redisService },
+        CorrelationIdService,
       ],
     }).compile();
 

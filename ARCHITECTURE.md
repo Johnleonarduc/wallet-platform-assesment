@@ -45,14 +45,16 @@ deployment today - `WorkersModule` and `QueueModule` are wired into the same
 
 Every inbound HTTP request passes through, in order:
 
-1. `CorrelationIdMiddleware` - stamps `X-Correlation-Id` on the request/response.
+1. `CorrelationIdMiddleware` - stamps `X-Correlation-Id` on the request/response
+   and establishes an async-local context for downstream work.
 2. `ApiHeadersGuard`-equivalent auth: the global `JwtAuthGuard` (backed by
    `passport-jwt`), which every route requires unless annotated with
    `@Public()` (used by `POST /auth/login` and `GET /health`).
 3. The global `ValidationPipe` (`transform: true`, `whitelist: true`),
    which validates and coerces the DTO for the matched route.
 4. The controller/service for the module that owns the route.
-5. `LoggingInterceptor` logs method, path, and duration on the way out.
+5. `LoggingInterceptor` logs correlation ID, method, path, and duration on the
+   way out.
 6. `AllExceptionsFilter` catches anything thrown along the way and renders a
    consistent JSON error body.
 
@@ -107,18 +109,21 @@ and type with pagination.
 `OutboxService` persists an `OutboxEvent` document (`routingKey` + `payload`)
 in the same MongoDB transaction as the domain write that produced it.
 `OutboxRelayWorker` polls for `PENDING` events on an interval, publishes them
-to RabbitMQ via `RabbitMQService`, and marks them `PUBLISHED`.
+to RabbitMQ via `RabbitMQService`, and marks them `PUBLISHED`. The payload also
+persists the originating correlation ID so the relay can restore diagnostic
+context after an arbitrary delay or process restart.
 
 ### Queue
 
 `RabbitMQService` owns a single `amqp-connection-manager` connection and
 channel, declares the `wallet.events` topic exchange and the
 `transfer.events.queue` queue (bound to `transfer.*`), and exposes a
-`publish(routingKey, payload)` method used by both the outbox relay worker
-and `WalletsService.transfer`.
+`publish(routingKey, payload)` method used by the outbox relay worker. It copies
+the persisted correlation ID into the AMQP message properties.
 
 `TransferEventsConsumer` subscribes to `transfer.events.queue` on startup and,
-for each `transfer.initiated` message, credits the destination wallet,
+for each `transfer.initiated` message, restores its correlation context,
+credits the destination wallet,
 records the corresponding transaction/ledger entry, and marks the transfer
 `COMPLETED`.
 

@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { CorrelationIdService } from '../common/correlation-id.service';
 import { OutboxService } from '../outbox/outbox.service';
 import { RabbitMQService } from '../queue/rabbitmq.service';
 import { OutboxRelayWorker } from './outbox-relay.worker';
@@ -25,7 +26,12 @@ describe('OutboxRelayWorker', () => {
     const configService = {
       getOrThrow: jest.fn().mockReturnValue(10),
     } as unknown as ConfigService;
-    const worker = new OutboxRelayWorker(outboxService, rabbitMQService, configService);
+    const worker = new OutboxRelayWorker(
+      outboxService,
+      rabbitMQService,
+      configService,
+      new CorrelationIdService(),
+    );
 
     worker.onModuleInit();
     jest.advanceTimersByTime(10);

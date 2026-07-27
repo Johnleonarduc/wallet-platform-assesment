@@ -1,17 +1,25 @@
 import { Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { ClientSession, Model } from 'mongoose';
+import { CorrelationIdService } from '../common/correlation-id.service';
 import { OutboxEvent, OutboxEventDocument, OutboxEventStatus } from './schemas/outbox-event.schema';
 
 @Injectable()
 export class OutboxService {
   constructor(
     @InjectModel(OutboxEvent.name) private readonly outboxModel: Model<OutboxEventDocument>,
+    private readonly correlationIds: CorrelationIdService,
   ) {}
 
   async enqueue(routingKey: string, payload: Record<string, unknown>, session?: ClientSession) {
     const [event] = await this.outboxModel.create(
-      [{ routingKey, payload, status: OutboxEventStatus.PENDING }],
+      [
+        {
+          routingKey,
+          payload: { ...payload, correlationId: this.correlationIds.getOrCreate() },
+          status: OutboxEventStatus.PENDING,
+        },
+      ],
       session ? { session } : undefined,
     );
     return event;

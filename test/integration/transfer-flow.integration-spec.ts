@@ -57,6 +57,7 @@ describe('Transfer flow (integration)', () => {
 
     const transferResponse = await client
       .post('/wallets/transfer')
+      .set('x-correlation-id', 'integration-transfer-correlation')
       .send({ fromWalletId: fromWallet.body._id, toWalletId: toWallet.body._id, amount: 120 })
       .expect(201);
 
@@ -92,6 +93,7 @@ describe('Transfer flow (integration)', () => {
       'payload.transferId': transferResponse.body._id,
     });
     expect(outboxEvent).toBeTruthy();
+    expect(outboxEvent?.payload.correlationId).toBe('integration-transfer-correlation');
   });
 
   it('recovers a stale pending transfer by enqueueing a new settlement event', async () => {

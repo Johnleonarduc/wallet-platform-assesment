@@ -7,10 +7,13 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
+import { CorrelationIdService } from '../correlation-id.service';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  constructor(private readonly correlationIds: CorrelationIdService) {}
 
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
@@ -25,7 +28,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       : { message: 'Internal server error' };
 
     this.logger.error(
-      `${request.method} ${request.url} -> ${status} ${
+      `${this.correlationIds.format()} ${request.method} ${request.url} -> ${status} ${
         exception instanceof Error ? exception.message : JSON.stringify(exception)
       }`,
       exception instanceof Error ? exception.stack : undefined,

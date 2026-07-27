@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { ConsumeMessage } from 'amqplib';
 import { Connection, isValidObjectId, Model } from 'mongoose';
+import { CorrelationIdService } from '../common/correlation-id.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { RedisService } from '../redis/redis.service';
 import {
@@ -19,6 +20,7 @@ export interface TransferInitiatedEvent {
   fromWalletId: string;
   toWalletId: string;
   amount: number;
+  correlationId?: string;
 }
 
 class InvalidTransferEventError extends Error {}
@@ -36,6 +38,7 @@ export class TransferEventsConsumer implements OnModuleInit {
     private readonly transactionModel: Model<TransactionDocument>,
     private readonly ledgerService: LedgerService,
     private readonly redisService: RedisService,
+    private readonly correlationIds: CorrelationIdService,
   ) {}
 
   onModuleInit() {
@@ -50,18 +53,36 @@ export class TransferEventsConsumer implements OnModuleInit {
   private async handleMessage(message: ConsumeMessage | null, channel: any) {
     if (!message) return;
 
+    let event: TransferInitiatedEvent | undefined;
     try {
-      const event: TransferInitiatedEvent = JSON.parse(message.content.toString());
-      await this.completeTransfer(event);
-      channel.ack(message);
+      event = JSON.parse(message.content.toString()) as TransferInitiatedEvent;
     } catch (error) {
-      this.logger.error(`Failed to process transfer event: ${(error as Error).message}`);
-      if (error instanceof SyntaxError || error instanceof InvalidTransferEventError) {
+      const correlationId = message.properties?.correlationId || this.correlationIds.getOrCreate();
+      return this.correlationIds.run(correlationId, () => {
+        this.logger.error(
+          `${this.correlationIds.format()} Failed to parse transfer event: ${(error as Error).message}`,
+        );
         channel.ack(message);
-      } else {
-        channel.nack(message, false, true);
-      }
+      });
     }
+
+    const correlationId =
+      event.correlationId || message.properties?.correlationId || this.correlationIds.getOrCreate();
+    return this.correlationIds.run(correlationId, async () => {
+      try {
+        await this.completeTransfer(event);
+        channel.ack(message);
+      } catch (error) {
+        this.logger.error(
+          `${this.correlationIds.format()} Failed to process transfer event: ${(error as Error).message}`,
+        );
+        if (error instanceof InvalidTransferEventError) {
+          channel.ack(message);
+        } else {
+          channel.nack(message, false, true);
+        }
+      }
+    });
   }
 
   private async completeTransfer(event: TransferInitiatedEvent) {
@@ -89,7 +110,9 @@ export class TransferEventsConsumer implements OnModuleInit {
         if (!transfer) {
           const existing = await this.transferModel.findById(event.transferId).session(session);
           if (!existing) {
-            this.logger.warn(`Transfer ${event.transferId} not found, skipping`);
+            this.logger.warn(
+              `${this.correlationIds.format()} Transfer ${event.transferId} not found, skipping`,
+            );
             return;
           }
           if (existing.status === TransferStatus.COMPLETED) return;
@@ -140,10 +163,12 @@ export class TransferEventsConsumer implements OnModuleInit {
         await this.redisService.invalidateBalance(event.toWalletId);
       } catch (error) {
         this.logger.warn(
-          `Could not invalidate balance cache for wallet ${event.toWalletId}: ${(error as Error).message}`,
+          `${this.correlationIds.format()} Could not invalidate balance cache for wallet ${event.toWalletId}: ${(error as Error).message}`,
         );
       }
-      this.logger.log(`Transfer ${event.transferId} completed for wallet ${event.toWalletId}`);
+      this.logger.log(
+        `${this.correlationIds.format()} Transfer ${event.transferId} completed for wallet ${event.toWalletId}`,
+      );
     }
   }
 

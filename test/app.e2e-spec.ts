@@ -22,8 +22,10 @@ describe('AppModule (e2e)', () => {
   it('/health (GET) reports service status without requiring auth headers', () => {
     return request(app.getHttpServer())
       .get('/health')
+      .set('x-correlation-id', 'health-check-correlation')
       .expect(200)
       .expect((res) => {
+        expect(res.headers['x-correlation-id']).toBe('health-check-correlation');
         expect(res.body).toHaveProperty('status');
         expect(res.body).toHaveProperty('mongo');
         expect(res.body).toHaveProperty('redis');

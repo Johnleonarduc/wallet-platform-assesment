@@ -58,6 +58,10 @@ etc.).
   registered another listener for every recently updated wallet and never
   removed it. `setMaxListeners(0)` hid Node's warning while listener closures
   and worker state accumulated for the lifetime of the process.
+- **Correlation IDs stopped at the HTTP response header.** Middleware generated
+  or echoed an ID, but success logs, error logs, outbox records, RabbitMQ
+  messages, and consumer logs did not include it. A single transfer therefore
+  produced unrelated-looking request, relay, and settlement log entries.
 
 ## 2. What did you prioritize, and why?
 
@@ -126,6 +130,12 @@ memory growth and would eventually destabilize every long-running API instance.
 The worker now owns one stable listener, emits all snapshots through one event,
 removes the listener on shutdown, prevents overlapping ticks, and uses a lean
 projected query to reduce per-tick allocation.
+
+I then propagated correlation IDs across the asynchronous boundary because the
+financial fixes still needed to be operable in production. `AsyncLocalStorage`
+keeps concurrent request contexts isolated; outbox payloads persist the ID;
+RabbitMQ publishes it as a message property; and relay, consumer, HTTP, and
+exception logs render the same identifier.
 
 ## 3. How did you handle concurrency?
 
@@ -209,6 +219,12 @@ transaction as the balance, ledger, and outbox writes. A uniqueness conflict
 therefore rolls back the entire losing attempt rather than leaving a partial
 financial side effect.
 
+Correlation is written into the transactional outbox payload, so it survives
+process restarts and relay delay alongside the event itself. The relay restores
+that context before publishing and the consumer restores it before settlement.
+An integration assertion verifies that a caller-supplied HTTP correlation ID is
+present on the resulting transfer outbox event.
+
 ## 5. Trade-offs
 
 What did your fixes cost - complexity, latency, throughput, code
@@ -236,6 +252,11 @@ The snapshot event is now a single internal event carrying `walletId` and
 `balance`, instead of one dynamically named event per wallet. Any undocumented
 in-process listener that depended on the old dynamic event names would need to
 adopt the payload-based event, but no such consumer exists in this repository.
+
+Persisting a correlation ID slightly enlarges every outbox event and AMQP
+message. IDs supplied by callers are treated as diagnostic identifiers, not as
+authentication or idempotency data. Background work without an inbound ID gets
+a generated UUID so its logs remain traceable.
 
 The atomic withdrawal update also increments the existing wallet `version`
 field. A failed conditional update needs a second read to distinguish a missing
